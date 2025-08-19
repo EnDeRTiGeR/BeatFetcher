@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <external-files-path name="music" path="Music/YouTubeMP3/" />
+    <external-path name="external" path="." />
+    <files-path name="files" path="." />
+    <cache-path name="apk" path="apks/" />
+</paths>

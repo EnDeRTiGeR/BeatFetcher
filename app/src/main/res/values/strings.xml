@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">BeatFetcher</string>
+    <string name="convert_to_mp3">Convert to MP3</string>
+    <string name="youtube_url_hint">Enter YouTube URL</string>
+    <string name="select_file">Select File</string>
+    <string name="recent_downloads">Recent Downloads</string>
+    <string name="download_progress">Downloading: %1$d%%</string>
+    <string name="download_completed">Download completed</string>
+    <string name="download_failed">Download failed</string>
+    <string name="play_audio">Play Audio</string>
+    <string name="delete_download">Delete Download</string>
+</resources> 
