@@ -1,6 +1,6 @@
 # BeatFetcher
 
-A modern Android application that allows users to download and convert YouTube videos to M4A format. Built with Jetpack Compose, MVVM architecture, and modern Android development practices.
+A modern Android application that allows users to download and convert Music videos to M4A format (currently supporting youtube). Built with Jetpack Compose, MVVM architecture, and modern Android development practices.
 
 ## Features
 
