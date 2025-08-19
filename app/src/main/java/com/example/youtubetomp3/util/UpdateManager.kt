@@ -86,6 +86,7 @@ class UpdateManager @Inject constructor(
         val req = Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github+json")
+            .header("User-Agent", "BeatFetcher/${BuildConfig.VERSION_NAME}")
             .build()
         okHttpClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
@@ -115,7 +116,10 @@ class UpdateManager @Inject constructor(
     }
 
     private fun downloadApk(apkUrl: String): File? {
-        val req = Request.Builder().url(apkUrl).build()
+        val req = Request.Builder()
+            .url(apkUrl)
+            .header("User-Agent", "BeatFetcher/${BuildConfig.VERSION_NAME}")
+            .build()
         okHttpClient.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) {
                 Log.w(TAG, "APK download failed: ${'$'}{resp.code}")
