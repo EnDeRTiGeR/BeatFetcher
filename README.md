@@ -22,7 +22,7 @@ A modern Android application that allows users to download and convert YouTube v
 - **DI**: Hilt
 - **Database**: Room + Flow
 - **Networking**: OkHttp
-- **YouTube Extraction**: NewPipe Extractor (0.24.8)
+- **Extraction**: NewPipe Extractor (0.24.8)
 - **Transform/Playback**: Media3 Transformer (1.4.1) for M4A, Media3 ExoPlayer
 - **Concurrency**: Kotlin Coroutines + Flow
 - **Images**: Coil
