@@ -4,6 +4,8 @@ import android.content.Context
 import android.net.Uri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
+import androidx.media3.common.AudioAttributes
+import androidx.media3.session.MediaSession
 import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -24,6 +26,7 @@ class AudioPlayerService @Inject constructor(
 ) {
     
     private var exoPlayer: ExoPlayer? = null
+    private var mediaSession: MediaSession? = null
     private var lastKnownPosition: Long = 0L
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var positionJob: Job? = null
@@ -37,6 +40,12 @@ class AudioPlayerService @Inject constructor(
     
     private fun initializePlayer() {
         exoPlayer = ExoPlayer.Builder(context).build().apply {
+            val audioAttributes = AudioAttributes.Builder()
+                .setContentType(androidx.media3.common.C.AUDIO_CONTENT_TYPE_MUSIC)
+                .setUsage(androidx.media3.common.C.USAGE_MEDIA)
+                .build()
+            setAudioAttributes(audioAttributes, /* handleAudioFocus= */ true)
+
             addListener(object : Player.Listener {
                 override fun onPlaybackStateChanged(playbackState: Int) {
                     updateStateFromPlayer()
@@ -54,6 +63,9 @@ class AudioPlayerService @Inject constructor(
                     )
                 }
             })
+        }
+        exoPlayer?.let { player ->
+            mediaSession = MediaSession.Builder(context, player).build()
         }
     }
     
@@ -140,6 +152,8 @@ class AudioPlayerService @Inject constructor(
     }
     
     fun release() {
+        mediaSession?.release()
+        mediaSession = null
         exoPlayer?.release()
         exoPlayer = null
         stopPositionUpdates()
