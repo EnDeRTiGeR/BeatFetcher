@@ -1,6 +1,7 @@
 package com.example.youtubetomp3.ui
 
 import com.example.youtubetomp3.data.DownloadItem
+import com.example.youtubetomp3.data.LibrarySong
 
 data class MainUiState(
     val isLoading: Boolean = false,
@@ -16,5 +17,11 @@ data class MainUiState(
     val currentlyPlayingPath: String? = null,
     val playbackPositionMs: Long = 0L,
     val playbackDurationMs: Long = 0L,
-    val currentVideoId: String? = null // For YouTube preview
+    val artworkData: ByteArray? = null,
+    val currentVideoId: String? = null,
+    val shuffleEnabled: Boolean = false,
+    val repeatOne: Boolean = false,
+    val librarySongs: List<LibrarySong> = emptyList(),
+    val libraryLoading: Boolean = false,
+    val libraryError: String? = null
 )

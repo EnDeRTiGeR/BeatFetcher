@@ -33,6 +33,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import android.media.MediaMetadataRetriever
+import android.provider.MediaStore
+import android.content.ContentUris
 import javax.inject.Inject
 
 @HiltViewModel
@@ -100,7 +102,8 @@ class MainViewModel @Inject constructor(
                             isPlaying = ps.isPlaying,
                             currentlyPlayingPath = ps.currentFilePath,
                             playbackPositionMs = ps.positionMs,
-                            playbackDurationMs = ps.durationMs
+                            playbackDurationMs = ps.durationMs,
+                            artworkData = ps.artworkData
                         )
                     }
                 }
@@ -108,7 +111,73 @@ class MainViewModel @Inject constructor(
                 Log.e("MainViewModel", "Player state collection failed", e)
             }
         }
+        // Auto-advance when a track ends
+        viewModelScope.launch {
+            try {
+                audioPlayerService.events.collect { ev ->
+                    when (ev) {
+                        is com.example.youtubetomp3.service.AudioPlayerService.PlayerEvent.TrackEnded -> playNext()
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Player events collection failed", e)
+            }
+        }
         createNotificationChannel()
+    }
+
+    fun scanLibrary(force: Boolean = false) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val alreadyLoaded = uiState.value.librarySongs.isNotEmpty() && !force
+            if (alreadyLoaded) return@launch
+            _uiState.update { it.copy(libraryLoading = true, libraryError = null) }
+            try {
+                val resolver = context.contentResolver
+                val collection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL)
+                } else {
+                    MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                }
+                val projection = arrayOf(
+                    MediaStore.Audio.Media._ID,
+                    MediaStore.Audio.Media.TITLE,
+                    MediaStore.Audio.Media.ARTIST,
+                    MediaStore.Audio.Media.DURATION,
+                    MediaStore.Audio.Media.MIME_TYPE
+                )
+                val selection = "(${MediaStore.Audio.Media.IS_MUSIC}!=0) AND (${MediaStore.Audio.Media.MIME_TYPE} IN (?,?,?))"
+                val selectionArgs = arrayOf("audio/mp4", "audio/m4a", "audio/mpeg")
+                val sortOrder = MediaStore.Audio.Media.DATE_ADDED + " DESC"
+
+                val items = mutableListOf<com.example.youtubetomp3.data.LibrarySong>()
+                resolver.query(collection, projection, selection, selectionArgs, sortOrder)?.use { c ->
+                    val idCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media._ID)
+                    val titleCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.TITLE)
+                    val artistCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.ARTIST)
+                    val durCol = c.getColumnIndexOrThrow(MediaStore.Audio.Media.DURATION)
+                    while (c.moveToNext()) {
+                        val id = c.getLong(idCol)
+                        val title = c.getString(titleCol) ?: "Unknown Title"
+                        val artist = c.getString(artistCol)
+                        val duration = c.getLong(durCol)
+                        val contentUri = ContentUris.withAppendedId(collection, id)
+                        items.add(com.example.youtubetomp3.data.LibrarySong(
+                            title = title,
+                            artist = artist,
+                            durationMs = duration,
+                            uri = contentUri.toString()
+                        ))
+                    }
+                }
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(librarySongs = items, libraryLoading = false, libraryError = null) }
+                }
+            } catch (e: Exception) {
+                withContext(Dispatchers.Main) {
+                    _uiState.update { it.copy(libraryLoading = false, libraryError = e.message ?: "Failed to scan library") }
+                }
+            }
+        }
     }
 
     @androidx.media3.common.util.UnstableApi
@@ -481,8 +550,26 @@ class MainViewModel @Inject constructor(
         Log.d("MainViewModel", "Playing audio: $filePath")
         viewModelScope.launch {
             try {
-                audioPlayerService.playAudio(filePath)
-                Log.d("MainViewModel", "Audio playback started")
+                // If the requested file is already the current item and playback is paused, resume instead of rebuilding the queue
+                if (uiState.value.currentlyPlayingPath == filePath && !uiState.value.isPlaying) {
+                    Log.d("MainViewModel", "Resuming existing audio instead of re-queueing: $filePath")
+                    audioPlayerService.resumeAudio()
+                    // Re-apply preferences in case they changed while paused
+                    audioPlayerService.setShuffle(uiState.value.shuffleEnabled)
+                    audioPlayerService.setRepeatOne(uiState.value.repeatOne)
+                    return@launch
+                }
+
+                val lib = uiState.value.librarySongs.map { it.uri }
+                val dls = uiState.value.downloads.map { it.filePath }
+                val list = if (lib.contains(filePath)) lib else dls
+                val idx = list.indexOf(filePath).let { if (it < 0) 0 else it }
+                // Build full queue so notification prev/next work
+                audioPlayerService.setQueue(list, idx)
+                // Apply current shuffle/repeat preferences to player
+                audioPlayerService.setShuffle(uiState.value.shuffleEnabled)
+                audioPlayerService.setRepeatOne(uiState.value.repeatOne)
+                Log.d("MainViewModel", "Audio queue set and playback started at index=$idx")
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Failed to play audio", e)
                 _uiState.update { it.copy(error = "Failed to play audio: ${e.message}") }
@@ -496,8 +583,63 @@ class MainViewModel @Inject constructor(
     }
     
     fun stopAudio() {
-        Log.d("MainViewModel", "Stopping audio")
-        audioPlayerService.stopAudio()
+        Log.d("MainViewModel", "Pausing audio")
+        audioPlayerService.pauseAudio()
+    }
+
+    // --- Spotify-like controls ---
+    fun toggleShuffle() {
+        val newVal = !uiState.value.shuffleEnabled
+        _uiState.update { it.copy(shuffleEnabled = newVal) }
+        audioPlayerService.setShuffle(newVal)
+    }
+
+    fun toggleRepeatOne() {
+        val newVal = !uiState.value.repeatOne
+        _uiState.update { it.copy(repeatOne = newVal) }
+        audioPlayerService.setRepeatOne(newVal)
+    }
+
+    private fun currentList(): List<String> {
+        val state = uiState.value
+        val cur = state.currentlyPlayingPath
+        val lib = state.librarySongs
+        return if (cur != null && lib.any { it.uri == cur }) {
+            lib.map { it.uri }
+        } else {
+            state.downloads.map { it.filePath }
+        }
+    }
+
+    private fun currentIndex(): Int? {
+        val cur = uiState.value.currentlyPlayingPath ?: return null
+        val list = currentList()
+        val idx = list.indexOf(cur)
+        return if (idx >= 0) idx else null
+    }
+
+    fun playIndex(index: Int) {
+        val list = currentList()
+        if (index in list.indices) {
+            playAudio(list[index])
+        }
+    }
+
+    fun playNext() {
+        audioPlayerService.skipToNext()
+    }
+
+    fun playPrevious() {
+        audioPlayerService.skipToPrevious()
+    }
+
+    fun seekToPercent(percent: Float) {
+        val dur = uiState.value.playbackDurationMs
+        if (dur > 0L) {
+            val p = percent.coerceIn(0f, 1f)
+            val to = (dur * p).toLong()
+            audioPlayerService.seekTo(to)
+        }
     }
 
     fun deleteDownload(downloadId: Long) {
@@ -700,4 +842,4 @@ class MainViewModel @Inject constructor(
             notificationManager.cancel(NOTIFICATION_ID)
         }
     }
-} 
+}
