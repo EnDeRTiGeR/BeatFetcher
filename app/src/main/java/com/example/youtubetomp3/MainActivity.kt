@@ -28,6 +28,9 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.WifiOff
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Menu
+import androidx.compose.material.icons.filled.DarkMode
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +48,8 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
@@ -62,23 +67,38 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.lifecycle.lifecycleScope
+import androidx.datastore.core.DataStore
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
+import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.edit
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import androidx.compose.runtime.saveable.rememberSaveable
 import dagger.hilt.android.AndroidEntryPoint
 import com.example.youtubetomp3.ui.MainViewModel
 import com.example.youtubetomp3.data.DownloadItem
 import com.example.youtubetomp3.ui.YouTubePlayerPreview
+import com.example.youtubetomp3.ui.MediaPlayerScreen
 import com.example.youtubetomp3.util.UpdateManager
 import javax.inject.Inject
+import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     companion object {
-        // TODO: Set these to your GitHub owner/repo for release checks
-        private const val GITHUB_OWNER = "YOUR_GITHUB_USERNAME"
-        private const val GITHUB_REPO = "YOUR_REPOSITORY_NAME"
+        // GitHub owner/repo for in-app update release checks
+        private const val GITHUB_OWNER = "EnDeRTiGeR"
+        private const val GITHUB_REPO = "BeatFetcher"
     }
     
     @Inject
     lateinit var githubUpdateManager: UpdateManager
+    @Inject
+    lateinit var dataStore: DataStore<Preferences>
     
     private val mainViewModel: MainViewModel by viewModels()
     
@@ -149,63 +169,173 @@ private fun SplashScreen(progress: Float) {
     }
     
     @androidx.media3.common.util.UnstableApi
+    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
         setContent {
-            MaterialTheme {
+            var useDarkTheme by rememberSaveable { mutableStateOf(false) }
+            MaterialTheme(colorScheme = if (useDarkTheme) darkColorScheme() else lightColorScheme()) {
                 var showSplash by remember { mutableStateOf(true) }
                 var progress by remember { mutableStateOf(0f) }
+                var selected by rememberSaveable { mutableStateOf(0) }
+                val drawerState = androidx.compose.material3.rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
+                val scope = rememberCoroutineScope()
+
                 LaunchedEffect(Unit) {
+                    // Load persisted theme and last section
+                    try {
+                        val prefs = dataStore.data.first()
+                        useDarkTheme = prefs[booleanPreferencesKey("theme_dark")] ?: false
+                        selected = prefs[intPreferencesKey("last_section")] ?: 0
+                    } catch (_: Exception) { }
                     val steps = 50
-                    val intervalMs = 100L // 50 * 100ms = 5000ms total
+                    val intervalMs = 100L
                     for (i in 0..steps) {
                         progress = i / steps.toFloat()
                         kotlinx.coroutines.delay(intervalMs)
                     }
                     showSplash = false
                 }
-                // Request permissions only after the splash has completed
                 LaunchedEffect(showSplash) {
                     if (!showSplash) {
                         requestStoragePermissions()
-                        // Trigger GitHub in-app update check when app is ready
                         try {
-                            if (isInternetAvailable() &&
-                                GITHUB_OWNER != "YOUR_GITHUB_USERNAME" &&
-                                GITHUB_REPO != "YOUR_REPOSITORY_NAME") {
+                            val hasNet = isInternetAvailable()
+                            val ownerRepoSet = (GITHUB_OWNER != "YOUR_GITHUB_USERNAME" && GITHUB_REPO != "YOUR_REPOSITORY_NAME")
+                            if (hasNet && ownerRepoSet) {
                                 githubUpdateManager.checkAndInstallIfAvailable(
                                     this@MainActivity,
                                     GITHUB_OWNER,
                                     GITHUB_REPO
                                 )
                             } else {
-                                Log.d("MainActivity", "Update check skipped: no internet connection")
+                                Log.d("MainActivity", "Update check skipped: internet=" + hasNet + ", ownerRepoSet=" + ownerRepoSet)
                             }
                         } catch (e: Exception) {
                             Log.e("MainActivity", "Update check failed", e)
                         }
                     }
                 }
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
-                    if (showSplash) {
+
+                if (showSplash) {
+                    Surface(
+                        modifier = Modifier.fillMaxSize(),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
                         SplashScreen(progress = progress)
-                    } else {
-                        YouTubeToMP3Screen(
-                            onUrlEntered = { url -> handleUrlInput(url) },
-                            onFileSelected = { getContent.launch("*/*") },
-                            sharedUrl = extractYouTubeUrl(intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""),
-                            onRequestPermissions = { requestStoragePermissions() }
-                        )
+                    }
+                } else {
+                    androidx.compose.material3.ModalNavigationDrawer(
+                        drawerState = drawerState,
+                        drawerContent = {
+                            androidx.compose.material3.ModalDrawerSheet {
+                                Spacer(Modifier.height(12.dp))
+                                androidx.compose.material3.NavigationDrawerItem(
+                                    label = { Text("Fetcher") },
+                                    selected = selected == 0,
+                                    onClick = {
+                                        selected = 0
+                                        scope.launch { drawerState.close() }
+                                        scope.launch { dataStore.edit { it[intPreferencesKey("last_section")] = 0 } }
+                                    },
+                                    icon = { Icon(Icons.Default.ContentPaste, contentDescription = null) }
+                                )
+                                androidx.compose.material3.NavigationDrawerItem(
+                                    label = { Text("Player") },
+                                    selected = selected == 1,
+                                    onClick = {
+                                        selected = 1
+                                        scope.launch { drawerState.close() }
+                                        scope.launch { dataStore.edit { it[intPreferencesKey("last_section")] = 1 } }
+                                    },
+                                    icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) }
+                                )
+                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                                Text(
+                                    "Theme",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
+                                )
+                                androidx.compose.material3.NavigationDrawerItem(
+                                    label = { Text("Light Theme") },
+                                    selected = !useDarkTheme,
+                                    onClick = {
+                                        useDarkTheme = false
+                                        scope.launch { dataStore.edit { it[booleanPreferencesKey("theme_dark")] = false } }
+                                    },
+                                    icon = { Icon(Icons.Default.LightMode, contentDescription = null) }
+                                )
+                                androidx.compose.material3.NavigationDrawerItem(
+                                    label = { Text("Dark Theme") },
+                                    selected = useDarkTheme,
+                                    onClick = {
+                                        useDarkTheme = true
+                                        scope.launch { dataStore.edit { it[booleanPreferencesKey("theme_dark")] = true } }
+                                    },
+                                    icon = { Icon(Icons.Default.DarkMode, contentDescription = null) }
+                                )
+                            }
+                        }
+                    ) {
+                        androidx.compose.material3.Scaffold(
+                            topBar = {
+                                androidx.compose.material3.TopAppBar(
+                                    title = {},
+                                    navigationIcon = {
+                                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
+                                            Icon(Icons.Default.Menu, contentDescription = null)
+                                        }
+                                    }
+                                )
+                            }
+                        ) { innerPadding ->
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxSize()
+                                    .padding(innerPadding),
+                                color = MaterialTheme.colorScheme.background
+                            ) {
+                                if (selected == 0) {
+                                    YouTubeToMP3Screen(
+                                        onUrlEntered = { url -> handleUrlInput(url) },
+                                        onFileSelected = { getContent.launch("*/*") },
+                                        sharedUrl = extractYouTubeUrl(intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""),
+                                        onRequestPermissions = { requestStoragePermissions() }
+                                    )
+                                } else {
+                                    MediaPlayerScreen()
+                                }
+                            }
+                        }
                     }
                 }
             }
         }
     }
     
+    override fun onResume() {
+        super.onResume()
+        if (com.example.youtubetomp3.util.UpdateManager.shouldRetryAfterPermission) {
+            com.example.youtubetomp3.util.UpdateManager.shouldRetryAfterPermission = false
+            if (isInternetAvailable() &&
+                GITHUB_OWNER != "EnDeRTiGeR" &&
+                GITHUB_REPO != "BeatFetcher") {
+                lifecycleScope.launch {
+                    try {
+                        githubUpdateManager.checkAndInstallIfAvailable(
+                            this@MainActivity,
+                            GITHUB_OWNER,
+                            GITHUB_REPO
+                        )
+                    } catch (e: Exception) {
+                        Log.e("MainActivity", "Update retry failed", e)
+                    }
+                }
+            }
+        }
+    }
+
     private fun requestStoragePermissions() {
         try {
             val permissionsToRequest = mutableListOf<String>()
@@ -253,6 +383,8 @@ private fun SplashScreen(progress: Float) {
                 when {
                     activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> true
                     activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> true
+                    activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> true
+                    activeNetwork.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> true
                     else -> false
                 }
             } else {
@@ -604,7 +736,6 @@ fun YouTubeToMP3Screen(
             }
         }
 
-        // Downloads List
         if (uiState.downloads.isNotEmpty()) {
             Text(
                 text = "Recent Downloads",
@@ -615,7 +746,7 @@ fun YouTubeToMP3Screen(
             )
 
             LazyColumn {
-                items(uiState.downloads) { download ->
+                items(uiState.downloads.take(3)) { download ->
                     val isCurrent = uiState.currentlyPlayingPath == download.filePath
                     DownloadItemCard(
                         download = download,
