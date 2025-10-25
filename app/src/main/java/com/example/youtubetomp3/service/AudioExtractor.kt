@@ -259,8 +259,6 @@ class AudioExtractor @Inject constructor(
         }
     }
 
-    // FFmpeg fallback removed: Media3 Transformer is now used as the only conversion path.
-    
     /**
      * Download raw audio stream to temporary file for local conversion
      */
