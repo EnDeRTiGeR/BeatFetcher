@@ -1,6 +1,7 @@
 package com.example.youtubetomp3.util
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
@@ -8,6 +9,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.util.Log
+import android.widget.Toast
 import androidx.core.content.FileProvider
 import com.example.youtubetomp3.BuildConfig
 import dagger.hilt.android.qualifiers.ApplicationContext
@@ -29,6 +31,8 @@ class UpdateManager @Inject constructor(
     companion object {
         private const val TAG = "UpdateManager"
         private const val APK_MIME = "application/vnd.android.package-archive"
+        @Volatile
+        var shouldRetryAfterPermission: Boolean = false
     }
 
     suspend fun checkAndInstallIfAvailable(
@@ -51,11 +55,47 @@ class UpdateManager @Inject constructor(
                     Log.w(TAG, "No APK asset found in latest release")
                     return@withContext null
                 }
+                // Scope permission prompt to actual updates only (before download)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val canInstall = activity.packageManager.canRequestPackageInstalls()
+                    if (!canInstall) {
+                        withContext(Dispatchers.Main) {
+                            AlertDialog.Builder(activity)
+                                .setTitle("Enable install permission")
+                                .setMessage("To install updates, allow 'Install unknown apps' for BeatFetcher.")
+                                .setPositiveButton("Go to Settings") { _, _ ->
+                                    try {
+                                        shouldRetryAfterPermission = true
+                                        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                                            data = Uri.parse("package:${'$'}{activity.packageName}")
+                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                        }
+                                        activity.startActivity(intent)
+                                    } catch (e: ActivityNotFoundException) {
+                                        Log.w(TAG, "Unknown app sources settings unavailable", e)
+                                        Toast.makeText(activity, "Settings screen not available", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                                .setNegativeButton("Not now", null)
+                                .show()
+                        }
+                        return@withContext null
+                    }
+                }
 
-                downloadApk(apkUrl)
+                withContext(Dispatchers.Main) {
+                    Toast.makeText(context, "Update ${latestTag} found. Downloading...", Toast.LENGTH_SHORT).show()
+                }
+
+                val f = downloadApk(apkUrl)
+                if (f == null) {
+                    Log.w(TAG, "Download failed")
+                }
+                f
             } ?: return
 
             withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Launching installer...", Toast.LENGTH_SHORT).show()
                 installApk(activity, apkFile)
             }
         } catch (e: Exception) {
@@ -64,7 +104,7 @@ class UpdateManager @Inject constructor(
     }
 
     private fun isNewer(latest: String, current: String): Boolean {
-        // Try semantic compare vMAJOR.MINOR.PATCH, fallback to string compare
+        // Compare MAJOR.MINOR.PATCH numerically; differing prefixes (e.g., v) are ignored
         fun parse(v: String): List<Int> = v.trim().trimStart('v', 'V')
             .split('.')
             .mapNotNull { it.toIntOrNull() }
@@ -75,8 +115,8 @@ class UpdateManager @Inject constructor(
             val ci = c.getOrElse(i) { 0 }
             if (li != ci) return li > ci
         }
-        // If equal numerically but strings differ, fallback to inequality check
-        return latest != current
+        // Equal numerically -> not newer
+        return false
     }
 
     private data class Release(val tag: String, val htmlUrl: String, val apkUrl: String?)
@@ -86,6 +126,7 @@ class UpdateManager @Inject constructor(
         val req = Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
             .header("User-Agent", "BeatFetcher/${BuildConfig.VERSION_NAME}")
             .build()
         okHttpClient.newCall(req).execute().use { resp ->
@@ -105,6 +146,7 @@ class UpdateManager @Inject constructor(
                     val name = a.optString("name")
                     val contentType = a.optString("content_type")
                     val browserUrl = a.optString("browser_download_url")
+                    Log.d(TAG, "Release asset: name=$name, contentType=$contentType")
                     if (name.endsWith(".apk", ignoreCase = true) || contentType.contains("android.package-archive")) {
                         apkUrl = browserUrl
                         break
@@ -146,15 +188,24 @@ class UpdateManager @Inject constructor(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val canInstall = activity.packageManager.canRequestPackageInstalls()
             if (!canInstall) {
-                try {
-                    val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                        data = Uri.parse("package:${'$'}{activity.packageName}")
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                AlertDialog.Builder(activity)
+                    .setTitle("Enable install permission")
+                    .setMessage("To install updates, allow 'Install unknown apps' for BeatFetcher.")
+                    .setPositiveButton("Go to Settings") { _, _ ->
+                        try {
+                            shouldRetryAfterPermission = true
+                            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                                data = Uri.parse("package:${'$'}{activity.packageName}")
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            activity.startActivity(intent)
+                        } catch (e: ActivityNotFoundException) {
+                            Log.w(TAG, "Unknown app sources settings unavailable", e)
+                            Toast.makeText(activity, "Settings screen not available", Toast.LENGTH_SHORT).show()
+                        }
                     }
-                    activity.startActivity(intent)
-                } catch (e: ActivityNotFoundException) {
-                    Log.w(TAG, "Unknown app sources settings unavailable", e)
-                }
+                    .setNegativeButton("Not now", null)
+                    .show()
                 // User must grant permission; ask them to retry
                 return
             }
