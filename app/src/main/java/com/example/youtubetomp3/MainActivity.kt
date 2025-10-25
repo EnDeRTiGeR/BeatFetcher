@@ -91,8 +91,8 @@ import kotlinx.coroutines.launch
 class MainActivity : ComponentActivity() {
     companion object {
         // GitHub owner/repo for in-app update release checks
-        private const val GITHUB_OWNER = "EnDeRTiGeR"
-        private const val GITHUB_REPO = "BeatFetcher"
+        private const val GITHUB_OWNER = "YOUR_GITHUB_USERNAME"
+        private const val GITHUB_REPO = "YOUR_REPOSITORY_NAME"
     }
     
     @Inject
