@@ -92,8 +92,8 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     companion object {
         // GitHub owner/repo for in-app update release checks
-        private const val GITHUB_OWNER = "EnDeRTiGeR"
-        private const val GITHUB_REPO = "BeatFetcher"
+        private const val GITHUB_OWNER = "YOUR_GITHUB_NAME"
+        private const val GITHUB_REPO = "YOUR_GITHUB_REPO"
     }
     
     @Inject
@@ -228,7 +228,7 @@ private fun SplashScreen(progress: Float) {
                         requestStoragePermissions()
                         try {
                             val hasNet = isInternetAvailable()
-                            if (hasNet && (GITHUB_OWNER != "EnDeRTiGeR" && GITHUB_REPO != "BeatFetcher")) {
+                            if (hasNet && (GITHUB_OWNER != "YOUR_GITHUB_NAME" && GITHUB_REPO != "YOUR_GITHUB_REPO")) {
                                 githubUpdateManager.checkAndInstallIfAvailable(
                                     this@MainActivity,
                                     GITHUB_OWNER,
