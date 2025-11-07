@@ -19,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.Canvas
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
@@ -37,6 +38,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.animation.core.Animatable
@@ -48,14 +50,13 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.draw.clipToBounds
@@ -67,39 +68,36 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.lifecycle.lifecycleScope
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.edit
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.map
-import androidx.compose.runtime.saveable.rememberSaveable
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
+import androidx.compose.material3.ExperimentalMaterial3Api
 import dagger.hilt.android.AndroidEntryPoint
 import com.example.youtubetomp3.ui.MainViewModel
+import com.example.youtubetomp3.ui.MediaPlayerScreen
+import com.example.youtubetomp3.data.appDataStore
+import com.example.youtubetomp3.util.formatTime
 import com.example.youtubetomp3.data.DownloadItem
 import com.example.youtubetomp3.ui.YouTubePlayerPreview
-import com.example.youtubetomp3.ui.MediaPlayerScreen
 import com.example.youtubetomp3.util.UpdateManager
 import javax.inject.Inject
-import kotlinx.coroutines.launch
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     companion object {
         // GitHub owner/repo for in-app update release checks
-        private const val GITHUB_OWNER = "YOUR_GITHUB_USERNAME"
-        private const val GITHUB_REPO = "YOUR_REPOSITORY_NAME"
+        private const val GITHUB_OWNER = "EnDeRTiGeR"
+        private const val GITHUB_REPO = "BeatFetcher"
     }
     
     @Inject
     lateinit var githubUpdateManager: UpdateManager
-    @Inject
-    lateinit var dataStore: DataStore<Preferences>
-    
     private val mainViewModel: MainViewModel by viewModels()
     
     private val getContent = registerForActivityResult(ActivityResultContracts.GetContent()) { uri ->
@@ -115,6 +113,21 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun SplashScreen(progress: Float) {
+    val scale = remember { Animatable(0.85f) }
+    LaunchedEffect(Unit) {
+        scale.animateTo(1f, animationSpec = tween(durationMillis = 800, easing = LinearEasing))
+    }
+    val ring = rememberInfiniteTransition(label = "ring")
+    val sweep by ring.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "sweep"
+    )
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -122,19 +135,31 @@ private fun SplashScreen(progress: Float) {
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Image(
-            painter = painterResource(id = R.mipmap.mp3_foreground),
-            contentDescription = "App Icon",
-            modifier = Modifier
-                .size(96.dp)
-                .padding(bottom = 24.dp)
-        )
-        LinearProgressIndicator(
-            progress = { progress },
-            modifier = Modifier
-                .fillMaxWidth(0.6f)
-        )
-        Spacer(modifier = Modifier.height(8.dp))
+        Box(modifier = Modifier.size(120.dp), contentAlignment = Alignment.Center) {
+            // Capture theme color in composable scope; use inside Canvas draw scope
+            val primaryColor = MaterialTheme.colorScheme.primary
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val stroke = 8.dp.toPx()
+                drawArc(
+                    color = primaryColor,
+                    startAngle = -90f,
+                    sweepAngle = sweep,
+                    useCenter = false,
+                    style = Stroke(width = stroke)
+                )
+            }
+            Image(
+                painter = painterResource(id = R.mipmap.mp3_foreground),
+                contentDescription = "App Icon",
+                modifier = Modifier
+                    .size(96.dp)
+                    .graphicsLayer {
+                        scaleX = scale.value
+                        scaleY = scale.value
+                    }
+            )
+        }
+        Spacer(modifier = Modifier.height(12.dp))
         Text(text = "${(progress * 100).toInt()}%")
     }
 }
@@ -174,6 +199,7 @@ private fun SplashScreen(progress: Float) {
         super.onCreate(savedInstanceState)
         
         setContent {
+            val context = LocalContext.current
             var useDarkTheme by rememberSaveable { mutableStateOf(false) }
             MaterialTheme(colorScheme = if (useDarkTheme) darkColorScheme() else lightColorScheme()) {
                 var showSplash by remember { mutableStateOf(true) }
@@ -185,11 +211,11 @@ private fun SplashScreen(progress: Float) {
                 LaunchedEffect(Unit) {
                     // Load persisted theme and last section
                     try {
-                        val prefs = dataStore.data.first()
+                        val prefs = (context.applicationContext as android.content.Context).appDataStore.data.first()
                         useDarkTheme = prefs[booleanPreferencesKey("theme_dark")] ?: false
                         selected = prefs[intPreferencesKey("last_section")] ?: 0
                     } catch (_: Exception) { }
-                    val steps = 50
+                    val steps = 20
                     val intervalMs = 100L
                     for (i in 0..steps) {
                         progress = i / steps.toFloat()
@@ -202,15 +228,14 @@ private fun SplashScreen(progress: Float) {
                         requestStoragePermissions()
                         try {
                             val hasNet = isInternetAvailable()
-                            val ownerRepoSet = (GITHUB_OWNER != "YOUR_GITHUB_USERNAME" && GITHUB_REPO != "YOUR_REPOSITORY_NAME")
-                            if (hasNet && ownerRepoSet) {
+                            if (hasNet && (GITHUB_OWNER != "EnDeRTiGeR" && GITHUB_REPO != "BeatFetcher")) {
                                 githubUpdateManager.checkAndInstallIfAvailable(
                                     this@MainActivity,
                                     GITHUB_OWNER,
                                     GITHUB_REPO
                                 )
                             } else {
-                                Log.d("MainActivity", "Update check skipped: internet=" + hasNet + ", ownerRepoSet=" + ownerRepoSet)
+                                Log.d("MainActivity", "Update check skipped")
                             }
                         } catch (e: Exception) {
                             Log.e("MainActivity", "Update check failed", e)
@@ -237,7 +262,9 @@ private fun SplashScreen(progress: Float) {
                                     onClick = {
                                         selected = 0
                                         scope.launch { drawerState.close() }
-                                        scope.launch { dataStore.edit { it[intPreferencesKey("last_section")] = 0 } }
+                                        scope.launch {
+                                            (context.applicationContext as android.content.Context).appDataStore.edit { it[intPreferencesKey("last_section")] = 0 }
+                                        }
                                     },
                                     icon = { Icon(Icons.Default.ContentPaste, contentDescription = null) }
                                 )
@@ -247,7 +274,9 @@ private fun SplashScreen(progress: Float) {
                                     onClick = {
                                         selected = 1
                                         scope.launch { drawerState.close() }
-                                        scope.launch { dataStore.edit { it[intPreferencesKey("last_section")] = 1 } }
+                                        scope.launch {
+                                            (context.applicationContext as android.content.Context).appDataStore.edit { it[intPreferencesKey("last_section")] = 1 }
+                                        }
                                     },
                                     icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) }
                                 )
@@ -262,7 +291,7 @@ private fun SplashScreen(progress: Float) {
                                     selected = !useDarkTheme,
                                     onClick = {
                                         useDarkTheme = false
-                                        scope.launch { dataStore.edit { it[booleanPreferencesKey("theme_dark")] = false } }
+                                        scope.launch { (context.applicationContext as android.content.Context).appDataStore.edit { it[booleanPreferencesKey("theme_dark")] = false } }
                                     },
                                     icon = { Icon(Icons.Default.LightMode, contentDescription = null) }
                                 )
@@ -271,7 +300,7 @@ private fun SplashScreen(progress: Float) {
                                     selected = useDarkTheme,
                                     onClick = {
                                         useDarkTheme = true
-                                        scope.launch { dataStore.edit { it[booleanPreferencesKey("theme_dark")] = true } }
+                                        scope.launch { (context.applicationContext as android.content.Context).appDataStore.edit { it[booleanPreferencesKey("theme_dark")] = true } }
                                     },
                                     icon = { Icon(Icons.Default.DarkMode, contentDescription = null) }
                                 )
@@ -455,6 +484,14 @@ private fun SplashScreen(progress: Float) {
         // Show a dialog explaining that the user needs to grant permissions in app settings
         // For now, we'll just log it
         Log.w("MainActivity", "Permission denied and user selected 'Don't ask again'")
+    }
+
+    override fun onDestroy() {
+        try {
+            mainViewModel.stopAudio()
+            mainViewModel.releasePlayer()
+        } catch (_: Exception) { }
+        super.onDestroy()
     }
 }
 
@@ -833,13 +870,7 @@ private fun AnimatedAccentBar(
     }
 }
 
-private fun formatTime(ms: Long): String {
-    if (ms <= 0L) return "0:00"
-    val totalSec = (ms / 1000).toInt()
-    val m = totalSec / 60
-    val s = totalSec % 60
-    return String.format(java.util.Locale.US, "%d:%02d", m, s)
-}
+ 
 
 @Composable
 fun DownloadItemCard(
