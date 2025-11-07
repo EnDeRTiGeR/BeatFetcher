@@ -1,14 +1,14 @@
 package com.example.youtubetomp3.service
 
 import android.content.Context
-import android.content.Intent
 import android.net.Uri
+import android.content.Intent
+import android.os.Build
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.AudioAttributes
 import androidx.media3.session.MediaSession
 import androidx.media3.exoplayer.ExoPlayer
-import androidx.core.content.ContextCompat
 import androidx.media3.common.MediaMetadata
 import android.media.MediaMetadataRetriever
 import kotlinx.coroutines.CoroutineScope
@@ -107,20 +107,6 @@ class AudioPlayerService @Inject constructor(
                         artData = mmr.embeddedPicture
                         mmr.release()
                     } catch (_: Exception) { }
-
-                    val displayTitle = title ?: uri.lastPathSegment ?: "Audio"
-                    val mdBuilder = MediaMetadata.Builder()
-                        .setTitle(displayTitle)
-                        .setArtist(artist)
-                        .setAlbumTitle(album)
-                    if (artData != null) {
-                        mdBuilder.setArtworkData(artData, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
-                    }
-                    val item = MediaItem.Builder()
-                        .setUri(uri)
-                        .setMediaMetadata(mdBuilder.build())
-                        .build()
-                    setMediaItem(item)
                     prepare()
                     lastKnownPosition = 0L
                 } else {
@@ -134,6 +120,7 @@ class AudioPlayerService @Inject constructor(
                 }
                 play()
             }
+            startPlaybackServiceIfNeeded()
             
             _playerState.value = _playerState.value.copy(
                 currentFilePath = filePath,
@@ -141,14 +128,6 @@ class AudioPlayerService @Inject constructor(
             )
             updateStateFromPlayer()
             startPositionUpdates()
-
-            // Ensure foreground service for media playback is running
-            try {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, PlaybackForegroundService::class.java)
-                )
-            } catch (_: Exception) { }
         } catch (e: Exception) {
             _playerState.value = _playerState.value.copy(
                 error = "Failed to play audio: ${e.message}"
@@ -170,6 +149,7 @@ class AudioPlayerService @Inject constructor(
             if (lastKnownPosition > 0L) player.seekTo(lastKnownPosition)
             player.play()
         }
+        startPlaybackServiceIfNeeded()
         updateStateFromPlayer()
         startPositionUpdates()
     }
@@ -177,11 +157,15 @@ class AudioPlayerService @Inject constructor(
     fun stopAudio() {
         exoPlayer?.stop()
         lastKnownPosition = 0L
+        // Release MediaSession so the system media controls/notification disappear
+        mediaSession?.release()
+        mediaSession = null
         _playerState.value = _playerState.value.copy(
             currentFilePath = null,
             isPlaying = false
         )
         stopPositionUpdates()
+        stopPlaybackService()
     }
     
     fun seekTo(position: Long) {
@@ -207,6 +191,7 @@ class AudioPlayerService @Inject constructor(
         exoPlayer?.release()
         exoPlayer = null
         stopPositionUpdates()
+        stopPlaybackService()
     }
 
     fun getPlayer(): ExoPlayer? = exoPlayer
@@ -283,14 +268,7 @@ class AudioPlayerService @Inject constructor(
             player.setMediaItems(items, startIndex, /*startPositionMs=*/0)
             player.prepare()
             player.play()
-            lastKnownPosition = 0L
-            // Ensure foreground playback notification is shown for queue playback
-            try {
-                ContextCompat.startForegroundService(
-                    context,
-                    Intent(context, PlaybackForegroundService::class.java)
-                )
-            } catch (_: Exception) { }
+            startPlaybackServiceIfNeeded()
         } catch (_: Exception) { }
     }
 
@@ -362,6 +340,24 @@ class AudioPlayerService @Inject constructor(
         try {
             val rich = buildRichMediaItem(uri)
             player.replaceMediaItem(idx, rich)
+        } catch (_: Exception) { }
+    }
+
+    private fun startPlaybackServiceIfNeeded() {
+        try {
+            val intent = Intent(context, PlaybackForegroundService::class.java)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        } catch (_: Exception) { }
+    }
+
+    private fun stopPlaybackService() {
+        try {
+            val intent = Intent(context, PlaybackForegroundService::class.java)
+            context.stopService(intent)
         } catch (_: Exception) { }
     }
 }

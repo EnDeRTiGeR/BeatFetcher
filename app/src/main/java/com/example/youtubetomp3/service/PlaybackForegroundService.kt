@@ -4,6 +4,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
 import android.content.Intent
+import android.app.PendingIntent
 import android.net.Uri
 import android.os.Build
 import android.os.IBinder
@@ -22,6 +23,7 @@ import android.graphics.Shader
 import android.graphics.Color
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
+import com.example.youtubetomp3.MainActivity
 
 @AndroidEntryPoint
 class PlaybackForegroundService : Service() {
@@ -67,10 +69,17 @@ class PlaybackForegroundService : Service() {
                     if (!resolved.isNullOrBlank()) return resolved
                     return "Playing"
                 }
-                override fun createCurrentContentIntent(player: androidx.media3.common.Player) = null
+                override fun createCurrentContentIntent(player: androidx.media3.common.Player): PendingIntent? {
+                    val intent = Intent(this@PlaybackForegroundService, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                    }
+                    val flags = PendingIntent.FLAG_UPDATE_CURRENT or (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE else 0)
+                    return PendingIntent.getActivity(this@PlaybackForegroundService, 0, intent, flags)
+                }
                 override fun getCurrentContentText(player: androidx.media3.common.Player): CharSequence? {
+                    // Show buffering state prominently; fall back to artist name
+                    if (player.playbackState == androidx.media3.common.Player.STATE_BUFFERING) return "Buffering..."
                     val md = player.mediaMetadata
-                    // Use artist metadata when available; otherwise return null
                     return md.artist
                 }
                 override fun getCurrentLargeIcon(player: androidx.media3.common.Player, callback: PlayerNotificationManager.BitmapCallback): Bitmap? {
