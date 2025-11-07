@@ -40,6 +40,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.YouTubeToMP3"
         android:usesCleartextTraffic="true"
+        android:appCategory="audio"
         tools:targetApi="31">
         
         <activity
@@ -53,6 +54,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!-- Declare as a Music app for OEM categorization and launchers -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.APP_MUSIC" />
             </intent-filter>
             
             <!-- Intent filter for YouTube share -->
