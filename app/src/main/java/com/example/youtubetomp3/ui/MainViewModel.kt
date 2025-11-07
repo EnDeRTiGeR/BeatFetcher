@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -33,9 +34,15 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.withContext
 import android.media.MediaMetadataRetriever
+import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
+import com.example.youtubetomp3.data.appDataStore
 import android.provider.MediaStore
 import android.content.ContentUris
 import javax.inject.Inject
+
+ 
 
 @HiltViewModel
 class MainViewModel @Inject constructor(
@@ -68,6 +75,12 @@ class MainViewModel @Inject constructor(
     private var uiProgressLastLabel = ""
     private var byteUiLastTs = 0L
     private var byteUiLastBytes = 0L
+
+    // Persist last playback info
+    private val KEY_LAST_PATH = stringPreferencesKey("last_path")
+    private val KEY_LAST_POS = longPreferencesKey("last_pos_ms")
+    private var lastPersistedPath: String? = null
+    private var lastPersistedPos: Long = -1L
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -106,10 +119,43 @@ class MainViewModel @Inject constructor(
                             artworkData = ps.artworkData
                         )
                     }
+                    // Persist last playback path/position occasionally
+                    val path = ps.currentFilePath
+                    val pos = ps.positionMs
+                    val now = System.currentTimeMillis()
+                    val shouldPersist = path != null && (
+                        path != lastPersistedPath ||
+                        kotlin.math.abs(pos - lastPersistedPos) >= 2000
+                    )
+                    if (shouldPersist) {
+                        try {
+                            context.appDataStore.edit { prefs ->
+                                prefs[KEY_LAST_PATH] = path!!
+                                prefs[KEY_LAST_POS] = pos
+                            }
+                            lastPersistedPath = path
+                            lastPersistedPos = pos
+                        } catch (_: Exception) { }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Player state collection failed", e)
             }
+        }
+        // Load last saved playback info on startup
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                val prefs = context.appDataStore.data.first()
+                val p = prefs[KEY_LAST_PATH]
+                val ms = prefs[KEY_LAST_POS] ?: 0L
+                if (!p.isNullOrBlank()) {
+                    withContext(Dispatchers.Main) {
+                        _uiState.update { it.copy(currentlyPlayingPath = p, playbackPositionMs = ms) }
+                        lastPersistedPath = p
+                        lastPersistedPos = ms
+                    }
+                }
+            } catch (_: Exception) { }
         }
         // Auto-advance when a track ends
         viewModelScope.launch {
@@ -583,8 +629,24 @@ class MainViewModel @Inject constructor(
     }
     
     fun stopAudio() {
-        Log.d("MainViewModel", "Pausing audio")
-        audioPlayerService.pauseAudio()
+        Log.d("MainViewModel", "Stopping audio")
+        audioPlayerService.stopAudio()
+    }
+
+    fun releasePlayer() {
+        Log.d("MainViewModel", "Releasing player resources")
+        audioPlayerService.release()
+    }
+
+    fun resumeLastPlayback() {
+        val path = uiState.value.currentlyPlayingPath ?: return
+        val pos = uiState.value.playbackPositionMs
+        viewModelScope.launch {
+            try {
+                audioPlayerService.playAudio(path)
+                if (pos > 0L) audioPlayerService.seekTo(pos)
+            } catch (_: Exception) { }
+        }
     }
 
     // --- Spotify-like controls ---
