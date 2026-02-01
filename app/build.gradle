@@ -16,9 +16,36 @@ android {
         minSdk 30 // Android 11
         //noinspection OldTargetApi
         targetSdk 36
-        versionCode 7
-        versionName "1.3.2"
+        versionCode 10
+        versionName "2.0.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+    }
+
+    signingConfigs {
+        release {
+            // Use properties from user or project gradle.properties for safety
+            if (project.hasProperty('RELEASE_STORE_FILE')) {
+                storeFile file(RELEASE_STORE_FILE)
+                storePassword project.findProperty('RELEASE_STORE_PASSWORD') ?: ""
+                keyAlias project.findProperty('RELEASE_KEY_ALIAS') ?: ""
+                keyPassword project.findProperty('RELEASE_KEY_PASSWORD') ?: ""
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled = false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            // Only apply signing if properties are defined on this machine
+            if (project.hasProperty('RELEASE_STORE_FILE')) {
+                signingConfig = signingConfigs.release
+            }
+        }
     }
     
     splits {
@@ -75,18 +102,18 @@ android {
 
 dependencies {
     // Core Android
-    implementation 'androidx.appcompat:appcompat:1.6.1'
+    implementation 'androidx.appcompat:appcompat:1.7.1'
     // Core library desugaring (required for NewPipe on minSdk < 33)
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.2'
     // Core Android
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.6.1'
-    implementation 'androidx.activity:activity-compose:1.7.2'
+    implementation 'androidx.activity:activity-compose:1.12.2'
     
     // Compose
     implementation "androidx.compose.ui:ui:$compose_version"
     implementation "androidx.compose.ui:ui-tooling-preview:$compose_version"
-    implementation "androidx.compose.material3:material3:1.3.1"
+    implementation 'androidx.compose.material3:material3:1.4.0'
     implementation "androidx.compose.material:material-icons-extended:$compose_version"
     
     // Navigation
@@ -104,13 +131,13 @@ dependencies {
     implementation 'androidx.media3:media3-transformer:1.4.1'
     
     // YouTube extractor library - NewPipe
-    implementation 'com.github.teamnewpipe:NewPipeExtractor:0.24.8'
+    implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.25.1'
     
     // OkHttp logging for network debugging
     implementation "com.squareup.okhttp3:logging-interceptor:4.10.0"
     
     // Coil for image loading
-    implementation "io.coil-kt:coil-compose:2.2.2"
+    implementation "io.coil-kt:coil-compose:2.7.0"
     
     // Room for database
     implementation "androidx.room:room-runtime:2.5.0"
@@ -134,7 +161,7 @@ dependencies {
     implementation "androidx.work:work-runtime-ktx:2.7.1"
     
     // YouTube Player for video preview
-    implementation 'com.pierfrancescosoffritti.androidyoutubeplayer:core:12.1.0'
+    implementation 'com.pierfrancescosoffritti.androidyoutubeplayer:core:13.0.0'
     
     // Lifecycle
     implementation "androidx.lifecycle:lifecycle-runtime-compose:2.6.1"
