@@ -1,14 +1,18 @@
 # BeatFetcher
 
-A modern Android application that allows users to download and convert YouTube videos to M4A format. Built with Jetpack Compose, MVVM architecture, and modern Android development practices.
+A modern Android application that extracts audio from YouTube and local video files into M4A, and provides a built-in Media Session player. Built with Jetpack Compose + Material 3, MVVM, and Media3.
+
 
 ## Features
 
-- **Paste/Share URL Workflow**: Paste-only URL field (read-only), Paste and Clear icons; accepts URLs shared from youtube
-- **YouTube Audio Extraction**: Extracts audio and converts to M4A (AAC in MP4 container) using Media3 Transformer
+- **Two-mode UI (Extractor / Media Session)**: A persistent animated wave header acts as the app’s navigation and mode switch.
+  - Tap / double-tap toggles app mode.
+  - Vertical swipe on the center control toggles Light/Dark variant.
+- **Unified theming**: Light/Dark is a contrast variant; the active mode controls the base hue (Extractor = Purple, Media Session = Blue). The entire UI is tinted from a single resolved `ColorScheme`.
+- **YouTube Audio Extraction**: Extracts audio and converts to M4A (AAC in MP4 container) using Media3 Transformer.
 - **Public Music Visibility**: Saves output into the device's public Music directory via MediaStore (e.g., `Music/`)
 - **Reactive Downloads List**: Room + Flow for live updates as downloads complete or are deleted
-- **Audio Playback**: Built-in player (Media3 ExoPlayer) supporting content URIs
+- **Audio Playback**: Built-in player (Media3 ExoPlayer + Media3 Session) supporting content URIs and a foreground playback notification.
 - **Progress & Notifications**: Throttled progress updates
 - **File Management**: Delete downloads (handles both file paths and content URIs)
 - **Local Video Conversion**: Convert local video files to audio-only M4A
@@ -22,7 +26,7 @@ A modern Android application that allows users to download and convert YouTube v
 - **DI**: Hilt
 - **Database**: Room + Flow
 - **Networking**: OkHttp
-- **Extraction**: NewPipe Extractor (0.24.8)
+- **YouTube Extraction**: NewPipe Extractor (`v0.25.1`)
 - **Transform/Playback**: Media3 Transformer (1.4.1) for M4A, Media3 ExoPlayer
 - **Concurrency**: Kotlin Coroutines + Flow
 - **Images**: Coil
@@ -47,12 +51,15 @@ app/src/main/java/com/example/youtubetomp3/
 │   ├── AudioPlayerService.kt
 │   ├── DownloadService.kt
 │   ├── AudioDownloadService.kt
-│   └── AudioExtractor.kt
+│   ├── AudioExtractor.kt
+│   └── PlaybackForegroundService.kt
 ├── ui/                     # UI layer
 │   ├── MainUiState.kt
 │   ├── MainViewModel.kt
+│   ├── MediaPlayerScreen.kt
 │   └── YouTubePlayerPreview.kt
 ├── util/                   # Utilities
+│   ├── AppearanceBridge.kt
 │   ├── UpdateActionReceiver.kt
 │   └── UpdateChecker.kt
 ├── MainActivity.kt         # Main activity
@@ -103,6 +110,15 @@ app/src/main/java/com/example/youtubetomp3/
   3. Open the APK to install, then launch BeatFetcher
 
 ## Usage
+
+### UI Modes + Theme Gestures
+
+- **Extractor mode**: Used for URL input, preview, and conversion.
+- **Media Session mode**: Used for playback and library/now-playing UI.
+- **Switch mode**: Use the center control in the animated wave header.
+  - Extractor -> Media Session: tap.
+  - Media Session -> Extractor: double-tap.
+- **Switch Light/Dark variant**: vertical swipe on the center control.
 
 ### Downloading YouTube Videos
 
@@ -172,6 +188,10 @@ Background service for file downloads:
 - File management
 - Error handling
 
+### PlaybackForegroundService
+
+Foreground service used for playback controls and notification artwork. Notification visuals are theme-driven via a lightweight bridge (`AppearanceBridge`) to carry the resolved scheme colors outside of Compose.
+
 ### AudioPlayerService
 
 Audio playback functionality:
@@ -196,7 +216,10 @@ The app requires the following permissions:
 - `INTERNET`: For network access
 - `POST_NOTIFICATIONS` (Android 13+): For progress notifications
 - `FOREGROUND_SERVICE`: For foreground work during downloads
+- `FOREGROUND_SERVICE_MEDIA_PLAYBACK`: For playback foreground service
+- `FOREGROUND_SERVICE_DATA_SYNC`: For download foreground service
 - `READ_MEDIA_AUDIO` (Android 13+): For reading media when needed
+- `READ_MEDIA_VIDEO`: For video preview / local video selection where applicable
 - `READ_EXTERNAL_STORAGE` / `WRITE_EXTERNAL_STORAGE` (legacy devices only): Not required on Android 10+ with MediaStore
 - `ACCESS_NETWORK_STATE`: For connectivity checks
 
@@ -204,11 +227,13 @@ The app requires the following permissions:
 
 ### Gradle Configuration
 
-- **Compile SDK**: 34
+- **Compile SDK**: 36
 - **Min SDK**: 30 (Android 11)
-- **Target SDK**: 34
+- **Target SDK**: 36
 - **Kotlin Version**: 2.0.21
 - **Compose Version**: 1.7.3
+
+App ID: `com.beatfetcher.ytmp3`
 
 ### Dependencies
 
@@ -232,14 +257,6 @@ Downloading or converting YouTube content may be restricted by YouTube's Terms o
 3. Supporting additional formats/bitrates as allowed
 4. Hardening error handling for region/age/DRM-restricted videos
 
-### Future Enhancements
-
-- [ ] Share-to-app refinements and deep link handling
-- [ ] Background download queue with retries and cancellation
-- [ ] Playlist and channel support
-- [ ] Multiple audio quality/bitrate profiles
-- [ ] Metadata tagging (ID3/MP4) and editing UI
-- [ ] Crash/ANR monitoring and performance profiling
 
 ## Contributing
 
