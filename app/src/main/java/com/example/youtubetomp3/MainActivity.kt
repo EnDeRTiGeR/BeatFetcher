@@ -111,8 +111,8 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     companion object {
         // GitHub owner/repo for in-app update release checks
-        private const val GITHUB_OWNER = "EnDeRTiGeR"
-        private const val GITHUB_REPO = "BeatFetcher"
+        private const val GITHUB_OWNER = "Enter_Your_Username"
+        private const val GITHUB_REPO = "Enter_Your_Repo_Name_You_Saved_It_As"
     }
 
 private enum class BeatFetcherMode {
