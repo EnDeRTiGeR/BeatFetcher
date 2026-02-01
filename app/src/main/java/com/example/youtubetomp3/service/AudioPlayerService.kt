@@ -3,7 +3,10 @@ package com.example.youtubetomp3.service
 import android.content.Context
 import android.net.Uri
 import android.content.Intent
+import android.content.IntentFilter
+import android.content.BroadcastReceiver
 import android.os.Build
+import android.provider.MediaStore
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.AudioAttributes
@@ -11,6 +14,8 @@ import androidx.media3.session.MediaSession
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.common.MediaMetadata
 import android.media.MediaMetadataRetriever
+import android.media.AudioManager
+import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -36,14 +41,24 @@ class AudioPlayerService @Inject constructor(
     private var lastKnownPosition: Long = 0L
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var positionJob: Job? = null
+    private var bluetoothReceiver: BroadcastReceiver? = null
+    private var wasPlayingBeforeBluetoothDisconnect = false
+    private var autoCloseJob: Job? = null
+    private var pausedDueToBluetoothDisconnect = false
     
     private val _playerState = MutableStateFlow(PlayerState())
     val playerState: StateFlow<PlayerState> = _playerState.asStateFlow()
     private val _events = MutableSharedFlow<PlayerEvent>(extraBufferCapacity = 1)
     val events: SharedFlow<PlayerEvent> = _events
     
+    companion object {
+        private const val TAG = "AudioPlayerService"
+        private const val AUTO_CLOSE_DELAY_MS = 5 * 60 * 1000L // 5 minutes
+    }
+    
     init {
         initializePlayer()
+        registerBluetoothReceiver()
     }
     
     private fun initializePlayer() {
@@ -69,7 +84,21 @@ class AudioPlayerService @Inject constructor(
                 
                 override fun onIsPlayingChanged(isPlaying: Boolean) {
                     updateStateFromPlayer()
-                    if (isPlaying) startPositionUpdates() else stopPositionUpdates()
+                    if (isPlaying) {
+                        // Playback resumed - cancel auto-close timer
+                        cancelAutoCloseTimer()
+                        pausedDueToBluetoothDisconnect = false
+                        startPositionUpdates()
+                    } else {
+                        stopPositionUpdates()
+                        // When playback stops, save position in case it was paused due to audio focus loss
+                        // (e.g., Bluetooth disconnection). This allows resuming from the same position.
+                        exoPlayer?.let { player ->
+                            if (player.currentPosition > 0L) {
+                                lastKnownPosition = player.currentPosition
+                            }
+                        }
+                    }
                 }
                 
                 override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
@@ -86,6 +115,10 @@ class AudioPlayerService @Inject constructor(
     
     fun playAudio(filePath: String) {
         try {
+            // Cancel auto-close timer when user starts playing
+            cancelAutoCloseTimer()
+            pausedDueToBluetoothDisconnect = false
+            
             val uri = Uri.parse(filePath)
             exoPlayer?.apply {
                 val currentItem = currentMediaItem
@@ -93,20 +126,9 @@ class AudioPlayerService @Inject constructor(
                 if (!isSameItem) {
                     // New item or first play: replace, reset position, and prepare
                     stop()
-                    // Extract rich metadata from tags
-                    var title: String? = null
-                    var artist: String? = null
-                    var album: String? = null
-                    var artData: ByteArray? = null
-                    try {
-                        val mmr = MediaMetadataRetriever()
-                        mmr.setDataSource(context, uri)
-                        title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
-                        artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
-                        album = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
-                        artData = mmr.embeddedPicture
-                        mmr.release()
-                    } catch (_: Exception) { }
+                    // Set a MediaItem immediately so MediaSession/Bluetooth has title metadata.
+                    val item = buildRichMediaItem(uri)
+                    setMediaItem(item, /* startPositionMs= */ 0)
                     prepare()
                     lastKnownPosition = 0L
                 } else {
@@ -142,9 +164,21 @@ class AudioPlayerService @Inject constructor(
         }
         updateStateFromPlayer()
         stopPositionUpdates()
+        
+        // If paused due to Bluetooth disconnect, start auto-close timer
+        if (pausedDueToBluetoothDisconnect) {
+            startAutoCloseTimer()
+        } else {
+            // User manually paused - cancel any existing auto-close timer
+            cancelAutoCloseTimer()
+        }
     }
     
     fun resumeAudio() {
+        // Cancel auto-close timer when user resumes playback
+        cancelAutoCloseTimer()
+        pausedDueToBluetoothDisconnect = false
+        
         exoPlayer?.let { player ->
             if (lastKnownPosition > 0L) player.seekTo(lastKnownPosition)
             player.play()
@@ -155,6 +189,9 @@ class AudioPlayerService @Inject constructor(
     }
     
     fun stopAudio() {
+        cancelAutoCloseTimer()
+        pausedDueToBluetoothDisconnect = false
+        
         exoPlayer?.stop()
         lastKnownPosition = 0L
         // Release MediaSession so the system media controls/notification disappear
@@ -186,12 +223,97 @@ class AudioPlayerService @Inject constructor(
     }
     
     fun release() {
+        cancelAutoCloseTimer()
+        unregisterBluetoothReceiver()
         mediaSession?.release()
         mediaSession = null
         exoPlayer?.release()
         exoPlayer = null
         stopPositionUpdates()
         stopPlaybackService()
+    }
+    
+    /**
+     * Register BroadcastReceiver to detect audio output disconnection
+     * (Bluetooth, wired headphones, etc.) and pause playback automatically
+     */
+    private fun registerBluetoothReceiver() {
+        bluetoothReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context, intent: Intent) {
+                if (intent.action == AudioManager.ACTION_AUDIO_BECOMING_NOISY) {
+                    // This is triggered when audio output becomes unavailable
+                    // (e.g., Bluetooth disconnects, headphones unplugged, audio route changes)
+                    Log.d(TAG, "Audio output disconnected - pausing playback")
+                    val player = exoPlayer
+                    if (player != null && player.isPlaying) {
+                        wasPlayingBeforeBluetoothDisconnect = true
+                        pausedDueToBluetoothDisconnect = true
+                        Log.d(TAG, "Pausing playback due to audio output disconnection")
+                        pauseAudio()
+                        // Auto-close timer will be started by pauseAudio() since pausedDueToBluetoothDisconnect is true
+                    }
+                }
+            }
+        }
+        
+        val filter = IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY)
+        
+        try {
+            context.registerReceiver(bluetoothReceiver, filter)
+            Log.d(TAG, "Audio output receiver registered")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to register audio output receiver", e)
+        }
+    }
+    
+    /**
+     * Start auto-close timer when paused due to Bluetooth disconnect
+     * After 5 minutes of inactivity, release resources to save battery
+     */
+    private fun startAutoCloseTimer() {
+        // Cancel any existing timer first
+        cancelAutoCloseTimer()
+        
+        autoCloseJob = scope.launch {
+            try {
+                Log.d(TAG, "Auto-close timer started (5 minutes)")
+                delay(AUTO_CLOSE_DELAY_MS)
+                
+                // Check if still paused and due to Bluetooth disconnect
+                val player = exoPlayer
+                if (player != null && !player.isPlaying && pausedDueToBluetoothDisconnect) {
+                    Log.d(TAG, "Auto-closing app after 5 minutes of inactivity")
+                    
+                    // Release player resources to save battery
+                    stopAudio()
+                    
+                    // Emit event to notify ViewModel/UI if needed
+                    _events.tryEmit(PlayerEvent.AutoClosed)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in auto-close timer", e)
+            }
+        }
+    }
+    
+    /**
+     * Cancel the auto-close timer
+     */
+    private fun cancelAutoCloseTimer() {
+        autoCloseJob?.cancel()
+        autoCloseJob = null
+    }
+    
+    private fun unregisterBluetoothReceiver() {
+        bluetoothReceiver?.let { receiver ->
+            try {
+                context.unregisterReceiver(receiver)
+                Log.d(TAG, "Bluetooth receiver unregistered")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to unregister Bluetooth receiver", e)
+            }
+            bluetoothReceiver = null
+        }
     }
 
     fun getPlayer(): ExoPlayer? = exoPlayer
@@ -283,6 +405,44 @@ class AudioPlayerService @Inject constructor(
     fun skipToNext() { exoPlayer?.seekToNextMediaItem() }
     fun skipToPrevious() { exoPlayer?.seekToPreviousMediaItem() }
 
+    fun addToQueue(filePath: String) {
+        val player = exoPlayer ?: return
+        try {
+            val uri = Uri.parse(filePath)
+            player.addMediaItem(buildBasicMediaItem(uri))
+        } catch (_: Exception) { }
+    }
+
+    fun playNextInQueue(filePath: String) {
+        val player = exoPlayer ?: return
+        try {
+            val uri = Uri.parse(filePath)
+            val idx = (player.currentMediaItemIndex + 1).coerceAtLeast(0)
+            player.addMediaItem(idx, buildBasicMediaItem(uri))
+        } catch (_: Exception) { }
+    }
+
+    fun setCurrentArtwork(artworkData: ByteArray?) {
+        val player = exoPlayer ?: return
+        val idx = player.currentMediaItemIndex
+        if (idx < 0) return
+        val cur = player.currentMediaItem ?: return
+        val uri = cur.localConfiguration?.uri ?: return
+        val md = cur.mediaMetadata
+        val builder = MediaMetadata.Builder()
+            .setTitle(md.title)
+            .setArtist(md.artist)
+            .setAlbumTitle(md.albumTitle)
+
+        if (artworkData != null) {
+            builder.setArtworkData(artworkData, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+        }
+
+        try {
+            player.replaceMediaItem(idx, MediaItem.Builder().setUri(uri).setMediaMetadata(builder.build()).build())
+        } catch (_: Exception) { }
+    }
+
     private fun buildBasicMediaItem(uri: Uri): MediaItem {
         val title = uri.lastPathSegment ?: "Audio"
         val md = MediaMetadata.Builder()
@@ -291,21 +451,59 @@ class AudioPlayerService @Inject constructor(
         return MediaItem.Builder().setUri(uri).setMediaMetadata(md).build()
     }
 
+    private data class MediaStoreMeta(
+        val title: String?,
+        val artist: String?,
+        val album: String?,
+        val displayName: String?
+    )
+
+    private fun queryMediaStoreMeta(uri: Uri): MediaStoreMeta? {
+        if (!"content".equals(uri.scheme, ignoreCase = true)) return null
+        return try {
+            val proj = arrayOf(
+                MediaStore.Audio.Media.TITLE,
+                MediaStore.Audio.Media.ARTIST,
+                MediaStore.Audio.Media.ALBUM,
+                MediaStore.Audio.Media.DISPLAY_NAME
+            )
+            context.contentResolver.query(uri, proj, null, null, null)?.use { c ->
+                if (!c.moveToFirst()) return null
+                fun get(idx: Int): String? = if (idx >= 0) c.getString(idx) else null
+                val title = get(c.getColumnIndex(MediaStore.Audio.Media.TITLE))
+                val artist = get(c.getColumnIndex(MediaStore.Audio.Media.ARTIST))
+                val album = get(c.getColumnIndex(MediaStore.Audio.Media.ALBUM))
+                val displayName = get(c.getColumnIndex(MediaStore.Audio.Media.DISPLAY_NAME))
+                MediaStoreMeta(title = title, artist = artist, album = album, displayName = displayName)
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     private fun buildRichMediaItem(uri: Uri): MediaItem {
-        var title: String? = null
-        var artist: String? = null
-        var album: String? = null
+        // Prefer MediaStore fields for content:// URIs (Bluetooth/car head units often rely on these)
+        val ms = queryMediaStoreMeta(uri)
+        var title: String? = ms?.title
+        var artist: String? = ms?.artist
+        var album: String? = ms?.album
         var artData: ByteArray? = null
         try {
             val mmr = MediaMetadataRetriever()
             mmr.setDataSource(context, uri)
-            title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
-            artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
-            album = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
+            // Only override if MediaStore didn't provide values
+            if (title.isNullOrBlank()) title = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_TITLE)
+            if (artist.isNullOrBlank()) artist = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ARTIST)
+            if (album.isNullOrBlank()) album = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_ALBUM)
             artData = mmr.embeddedPicture
             mmr.release()
         } catch (_: Exception) { }
-        val displayTitle = title ?: uri.lastPathSegment ?: "Audio"
+
+        val displayTitle = when {
+            !title.isNullOrBlank() -> title
+            !ms?.displayName.isNullOrBlank() -> ms?.displayName
+            else -> uri.lastPathSegment ?: "Audio"
+        }
         val mdBuilder = MediaMetadata.Builder()
             .setTitle(displayTitle)
             .setArtist(artist)
@@ -326,6 +524,7 @@ class AudioPlayerService @Inject constructor(
 
     sealed class PlayerEvent {
         object TrackEnded : PlayerEvent()
+        object AutoClosed : PlayerEvent()
     }
 
     private fun ensureRichMetadataForCurrent() {

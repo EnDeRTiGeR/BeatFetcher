@@ -3,6 +3,7 @@ package com.example.youtubetomp3.ui
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -13,6 +14,9 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.scaleIn
 import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
@@ -22,6 +26,7 @@ import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material.icons.filled.Repeat
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -52,6 +57,9 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import kotlinx.coroutines.delay
+import coil.compose.AsyncImage
 
 @Composable
 fun MediaPlayerScreen(
@@ -59,7 +67,65 @@ fun MediaPlayerScreen(
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val showExtraArtwork = false
     var showNowPlaying by rememberSaveable { mutableStateOf(false) }
+    var dragY by remember { mutableStateOf(0f) }
+    var lastAutoShownPath by rememberSaveable { mutableStateOf<String?>(null) }
+
+    var actionsSheetOpen by rememberSaveable { mutableStateOf(false) }
+    var actionsSong by remember { mutableStateOf<LibrarySong?>(null) }
+    var actionsDownload by remember { mutableStateOf<DownloadItem?>(null) }
+    var moodDialogOpen by rememberSaveable { mutableStateOf(false) }
+    var moodText by rememberSaveable { mutableStateOf("") }
+
+    @OptIn(ExperimentalMaterial3Api::class)
+    val actionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    if (moodDialogOpen && actionsSong != null) {
+        AlertDialog(
+            onDismissRequest = { moodDialogOpen = false },
+            title = { Text("Set Mood") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = moodText,
+                        onValueChange = { moodText = it },
+                        singleLine = true,
+                        label = { Text("Mood (e.g. Party, Chill)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val v = moodText.trim().ifBlank { null }
+                        val dl = actionsDownload
+                        if (dl != null) {
+                            viewModel.updateDownloadMoodTag(dl.id, v)
+                        } else {
+                            actionsSong?.let { s -> viewModel.setLibraryMoodTag(s.uri, v) }
+                        }
+                        moodDialogOpen = false
+                    }
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        val dl = actionsDownload
+                        if (dl != null) {
+                            viewModel.updateDownloadMoodTag(dl.id, null)
+                        } else {
+                            actionsSong?.let { s -> viewModel.setLibraryMoodTag(s.uri, null) }
+                        }
+                        moodText = ""
+                        moodDialogOpen = false
+                    }
+                ) { Text("Clear") }
+            }
+        )
+    }
 
     LaunchedEffect(Unit) {
         viewModel.scanLibrary()
@@ -69,14 +135,8 @@ fun MediaPlayerScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(16.dp)
+                .padding(horizontal = 16.dp, vertical = 16.dp)
         ) {
-        Text(
-            text = "Player",
-            style = MaterialTheme.typography.titleLarge,
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
-
         // Search + Sort controls
         var query by remember { mutableStateOf("") }
         var sortByTitle by remember { mutableStateOf(true) }
@@ -169,11 +229,37 @@ fun MediaPlayerScreen(
                             }
                             items(list) { song ->
                                 val isCurrent = uiState.currentlyPlayingPath == song.uri
+                                val matchingDownload = remember(uiState.downloads, song.uri, song.title) {
+                                    // Primary: exact path match
+                                    uiState.downloads.find { it.filePath == song.uri }
+                                        ?: run {
+                                            // Fallback: match by filename (covers file:// vs content:// differences)
+                                            val songName = try {
+                                                android.net.Uri.parse(song.uri).lastPathSegment?.substringAfterLast('/')
+                                            } catch (_: Exception) { null }
+                                            uiState.downloads.find { dl ->
+                                                val dlName = try {
+                                                    android.net.Uri.parse(dl.filePath).lastPathSegment?.substringAfterLast('/')
+                                                } catch (_: Exception) { null }
+                                                !songName.isNullOrBlank() && !dlName.isNullOrBlank() && songName.equals(dlName, ignoreCase = true)
+                                            }
+                                        }
+                                        ?: uiState.downloads.find { dl ->
+                                            // Last resort: title+artist match
+                                            dl.title.equals(song.title, ignoreCase = true) && (dl.artist ?: "").equals(song.artist ?: "", ignoreCase = true)
+                                        }
+                                }
                                 LibrarySongRow(
                                     song = song,
+                                    download = matchingDownload,
                                     isPlaying = uiState.isPlaying && isCurrent,
                                     positionMs = if (isCurrent) uiState.playbackPositionMs else 0L,
                                     durationMs = if (isCurrent) uiState.playbackDurationMs else 0L,
+                                    onOpenActions = {
+                                        actionsSong = song
+                                        actionsDownload = matchingDownload
+                                        actionsSheetOpen = true
+                                    },
                                     onPlay = { viewModel.playAudio(song.uri) },
                                     onPause = { viewModel.pauseAudio() },
                                     onStop = { viewModel.stopAudio() }
@@ -211,19 +297,58 @@ fun MediaPlayerScreen(
 
         }
 
+        // Close main Column so overlays render above it within the root Box.
+        }
+
         // Auto-show Now Playing when a track starts
         LaunchedEffect(uiState.currentlyPlayingPath) {
-            if (uiState.currentlyPlayingPath != null) showNowPlaying = true
+            val path = uiState.currentlyPlayingPath
+            if (path != null && path != lastAutoShownPath) {
+                lastAutoShownPath = path
+                showNowPlaying = true
+            }
         }
 
         if (uiState.currentlyPlayingPath != null && showNowPlaying) {
             BackHandler(enabled = true) { showNowPlaying = false }
-            Surface(
-                modifier = Modifier
-                    .fillMaxSize(),
-                color = MaterialTheme.colorScheme.background
-            ) {
-                var dragY by remember { mutableStateOf(0f) }
+
+            val bgBmp = remember(uiState.artworkData, showExtraArtwork) {
+                if (!showExtraArtwork) null else {
+                uiState.artworkData?.let { data ->
+                    try { BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap() } catch (_: Exception) { null }
+                }
+            }
+            }
+
+            val nowPlayingScrimColor = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.78f)
+
+            Box(modifier = Modifier.fillMaxSize()) {
+                // Always paint a background/scrim so the underlying list never shows through.
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(MaterialTheme.colorScheme.surface)
+                )
+
+                if (bgBmp != null) {
+                    Image(
+                        bgBmp,
+                        contentDescription = null,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer { alpha = 0.22f },
+                        contentScale = ContentScale.Crop
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .drawBehind {
+                            drawRect(nowPlayingScrimColor)
+                        }
+                )
+
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
@@ -243,7 +368,6 @@ fun MediaPlayerScreen(
                             )
                         }
                 ) {
-                    // Now Playing header (close button removed)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = "Now Playing",
@@ -252,20 +376,20 @@ fun MediaPlayerScreen(
                         )
                     }
                     Spacer(Modifier.height(28.dp))
-                    // Center rotating disk
-                    val artForDisk = uiState.artworkData
+
                     RotatingDisk(
-                        artworkData = artForDisk,
+                        artworkData = uiState.artworkData,
                         isPlaying = uiState.isPlaying
                     )
                     Spacer(Modifier.height(8.dp))
+
                     val libMatch = uiState.librarySongs.find { it.uri == uiState.currentlyPlayingPath }
                     val dlMatch = uiState.downloads.find { it.filePath == uiState.currentlyPlayingPath }
                     Spacer(Modifier.weight(1f))
                     NowPlayingControls(
                         title = libMatch?.title ?: dlMatch?.title ?: "Playing",
                         artist = libMatch?.artist ?: dlMatch?.artist,
-                        artworkData = uiState.artworkData,
+                        artworkData = if (showExtraArtwork) uiState.artworkData else null,
                         isPlaying = uiState.isPlaying,
                         positionMs = uiState.playbackPositionMs,
                         durationMs = uiState.playbackDurationMs,
@@ -307,52 +431,156 @@ fun MediaPlayerScreen(
             val artist = libMatch?.artist ?: dlMatch?.artist
             val progress = if (uiState.playbackDurationMs > 0L)
                 (uiState.playbackPositionMs.toFloat() / uiState.playbackDurationMs.toFloat()).coerceIn(0f, 1f) else 0f
-            Card(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .padding(12.dp)
-                    .clickable { showNowPlaying = true },
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
-            ) {
-                Column(modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        // Artwork thumb
-                        val bmp = remember(uiState.artworkData) {
-                            uiState.artworkData?.let { data ->
-                                try { BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap() } catch (_: Exception) { null }
+            Box(modifier = Modifier.fillMaxSize()) {
+                Card(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .padding(12.dp)
+                        .clickable { showNowPlaying = true },
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+                ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Artwork thumb
+                            val bmp = remember(uiState.artworkData) {
+                                uiState.artworkData?.let { data ->
+                                    try { BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap() } catch (_: Exception) { null }
+                                }
                             }
-                        }
-                        if (bmp != null) {
-                            Image(bmp, contentDescription = null, modifier = Modifier.size(48.dp))
-                        } else {
-                            Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (bmp != null) {
+                                Image(bmp, contentDescription = null, modifier = Modifier.size(48.dp))
+                            } else {
+                                Box(modifier = Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+                                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
-                        }
-                        Spacer(Modifier.width(8.dp))
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
-                            if (!artist.isNullOrBlank()) {
-                                Text(artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                            Spacer(Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(title, style = MaterialTheme.typography.bodyMedium, maxLines = 1)
+                                if (!artist.isNullOrBlank()) {
+                                    Text(artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                                }
                             }
+                            IconButton(onClick = { if (uiState.isPlaying) viewModel.pauseAudio() else uiState.currentlyPlayingPath?.let { viewModel.playAudio(it) } }) {
+                                if (uiState.isPlaying) Icon(Icons.Default.Pause, contentDescription = null) else Icon(Icons.Default.PlayArrow, contentDescription = null)
+                            }
+                            IconButton(onClick = { viewModel.playNext() }) { Icon(Icons.Default.SkipNext, contentDescription = null) }
                         }
-                        IconButton(onClick = { if (uiState.isPlaying) viewModel.pauseAudio() else uiState.currentlyPlayingPath?.let { viewModel.playAudio(it) } }) {
-                            if (uiState.isPlaying) Icon(Icons.Default.Pause, contentDescription = null) else Icon(Icons.Default.PlayArrow, contentDescription = null)
-                        }
-                        IconButton(onClick = { viewModel.playNext() }) { Icon(Icons.Default.SkipNext, contentDescription = null) }
+                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
                     }
-                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                }
+            }
+        }
+
+        if (actionsSheetOpen && actionsSong != null) {
+            val song = actionsSong!!
+            val isCurrent = uiState.currentlyPlayingPath == song.uri
+            val isPlayingThis = uiState.isPlaying && isCurrent
+            val dl = actionsDownload
+
+            LaunchedEffect(actionsSheetOpen, song.uri, dl?.id) {
+                if (actionsSheetOpen) {
+                    moodText = if (dl != null) {
+                        dl.moodTag ?: ""
+                    } else {
+                        viewModel.getLibraryMoodTag(song.uri) ?: ""
+                    }
+                }
+            }
+
+            var appearCount by rememberSaveable(song.uri) { mutableStateOf(0) }
+            LaunchedEffect(actionsSheetOpen, song.uri, isPlayingThis, dl?.id) {
+                appearCount = 0
+                val total = 6
+                for (i in 1..total) {
+                    appearCount = i
+                    delay(60)
+                }
+            }
+
+            @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+            ModalBottomSheet(
+                onDismissRequest = { actionsSheetOpen = false },
+                sheetState = actionsSheetState
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Text(song.title, style = MaterialTheme.typography.titleMedium)
+                    song.artist?.takeIf { it.isNotBlank() }?.let { artist ->
+                        Text(artist, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Spacer(Modifier.height(12.dp))
+
+                    @Composable
+                    fun bubble(visibleIndex: Int, label: String, onClick: () -> Unit) {
+                        AnimatedVisibility(
+                            visible = appearCount >= visibleIndex,
+                            enter = fadeIn(animationSpec = tween(120)) + scaleIn(initialScale = 0.85f, animationSpec = spring(stiffness = Spring.StiffnessMediumLow))
+                        ) {
+                            AssistChip(
+                                onClick = onClick,
+                                label = { Text(label) },
+                                modifier = Modifier.padding(end = 8.dp, bottom = 8.dp)
+                            )
+                        }
+                    }
+
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.Start,
+                        verticalArrangement = Arrangement.Top
+                    ) {
+                        var idx = 1
+                        bubble(idx, if (isPlayingThis) "Pause" else "Play") {
+                            actionsSheetOpen = false
+                            if (isPlayingThis) viewModel.pauseAudio() else viewModel.playAudio(song.uri)
+                        }
+                        idx += 1
+                        bubble(idx, "Stop") {
+                            actionsSheetOpen = false
+                            viewModel.stopAudio()
+                        }
+                        idx += 1
+                        bubble(idx, "Play Next") {
+                            actionsSheetOpen = false
+                            viewModel.playNextFor(song.uri)
+                        }
+                        idx += 1
+                        bubble(idx, "Add to Queue") {
+                            actionsSheetOpen = false
+                            viewModel.addToQueue(song.uri)
+                        }
+                        idx += 1
+                        bubble(idx, "Set Mood") {
+                            actionsSheetOpen = false
+                            moodDialogOpen = true
+                        }
+                        idx += 1
+                        bubble(idx, "Delete") {
+                            actionsSheetOpen = false
+                            if (dl != null) {
+                                viewModel.deleteDownload(dl.id)
+                            } else {
+                                viewModel.deleteLibrarySong(song.uri)
+                            }
+                        }
+                    }
+
+                    Spacer(Modifier.height(12.dp))
                 }
             }
         }
     }
-}
+
 
 @Composable
 private fun PlayerItemRow(
@@ -400,17 +628,27 @@ private fun PlayerItemRow(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 fun LibrarySongRow(
     song: LibrarySong,
+    download: DownloadItem?,
     isPlaying: Boolean,
     positionMs: Long,
     durationMs: Long,
+    onOpenActions: () -> Unit,
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onStop: () -> Unit,
 ) {
     Card(
-        modifier = Modifier.fillMaxWidth()
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = {
+                    if (isPlaying) onPause() else onPlay()
+                },
+                onLongClick = onOpenActions
+            )
     ) {
         Row(
             modifier = Modifier
@@ -418,9 +656,36 @@ fun LibrarySongRow(
                 .padding(12.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            // Thumbnail / artwork fallback
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .clip(MaterialTheme.shapes.small),
+                contentAlignment = Alignment.Center
+            ) {
+                val thumb = download?.thumbnailUrl
+                if (!thumb.isNullOrBlank()) {
+                    AsyncImage(
+                        model = thumb,
+                        contentDescription = null,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Icon(Icons.Default.PlayArrow, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+            Spacer(Modifier.width(10.dp))
+
             Column(modifier = Modifier.weight(1f)) {
                 Text(text = song.title, style = MaterialTheme.typography.titleSmall)
                 Text(text = song.artist ?: "Unknown Artist", style = MaterialTheme.typography.bodySmall)
+                download?.moodTag?.takeIf { it.isNotBlank() }?.let { tag ->
+                    Text(
+                        text = "Mood: $tag",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
                 if (isPlaying && durationMs > 0L) {
                     val progress = (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f)
                     LinearProgressIndicator(
@@ -433,6 +698,9 @@ fun LibrarySongRow(
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
+                IconButton(onClick = onOpenActions) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "More")
+                }
                 if (isPlaying) {
                     IconButton(onClick = onPause) { Icon(Icons.Default.Pause, contentDescription = null) }
                     IconButton(onClick = onStop) { Icon(Icons.Default.Stop, contentDescription = null) }

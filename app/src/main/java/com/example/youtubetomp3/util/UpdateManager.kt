@@ -55,32 +55,15 @@ class UpdateManager @Inject constructor(
                     Log.w(TAG, "No APK asset found in latest release")
                     return@withContext null
                 }
-                // Scope permission prompt to actual updates only (before download)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val canInstall = activity.packageManager.canRequestPackageInstalls()
-                    if (!canInstall) {
-                        withContext(Dispatchers.Main) {
-                            AlertDialog.Builder(activity)
-                                .setTitle("Enable install permission")
-                                .setMessage("To install updates, allow 'Install unknown apps' for BeatFetcher.")
-                                .setPositiveButton("Go to Settings") { _, _ ->
-                                    try {
-                                        shouldRetryAfterPermission = true
-                                        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                                            data = Uri.parse("package:${'$'}{activity.packageName}")
-                                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                        }
-                                        activity.startActivity(intent)
-                                    } catch (e: ActivityNotFoundException) {
-                                        Log.w(TAG, "Unknown app sources settings unavailable", e)
-                                        Toast.makeText(activity, "Settings screen not available", Toast.LENGTH_SHORT).show()
-                                    }
-                                }
-                                .setNegativeButton("Not now", null)
-                                .show()
-                        }
-                        return@withContext null
+                
+                // Check install permission (Android 8.0+ / API 26+)
+                // Since app supports Android 10+, this check will always run
+                val canInstall = activity.packageManager.canRequestPackageInstalls()
+                if (!canInstall) {
+                    withContext(Dispatchers.Main) {
+                        showInstallPermissionDialog(activity)
                     }
+                    return@withContext null
                 }
 
                 withContext(Dispatchers.Main) {
@@ -100,6 +83,85 @@ class UpdateManager @Inject constructor(
             }
         } catch (e: Exception) {
             Log.e(TAG, "Update check/install failed", e)
+        }
+    }
+    
+    /**
+     * Show dialog to request install permission and open settings
+     * Works for Android 8.0+ (API 26+), which includes Android 10+
+     */
+    private fun showInstallPermissionDialog(activity: Activity) {
+        AlertDialog.Builder(activity)
+            .setTitle("Enable Install Permission")
+            .setMessage("To install updates, please allow 'Install unknown apps' permission for BeatFetcher in your device settings.")
+            .setPositiveButton("Open Settings") { _, _ ->
+                try {
+                    shouldRetryAfterPermission = true
+                    // Try the standard intent first (works on most devices)
+                    val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:${activity.packageName}")
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    
+                    // Check if intent can be resolved before starting
+                    if (intent.resolveActivity(activity.packageManager) != null) {
+                        activity.startActivity(intent)
+                    } else {
+                        // Fallback: try opening app info settings
+                        openAppInfoSettings(activity)
+                    }
+                } catch (e: ActivityNotFoundException) {
+                    Log.w(TAG, "Unknown app sources settings unavailable, trying fallback", e)
+                    openAppInfoSettings(activity)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to open install permission settings", e)
+                    Toast.makeText(
+                        activity,
+                        "Please enable 'Install unknown apps' for BeatFetcher in Settings > Apps > BeatFetcher > Install unknown apps",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+            }
+            .setNegativeButton("Cancel", null)
+            .setCancelable(true)
+            .show()
+    }
+    
+    /**
+     * Fallback: Open app info settings where user can find install permission
+     */
+    private fun openAppInfoSettings(activity: Activity) {
+        try {
+            val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                data = Uri.parse("package:${activity.packageName}")
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
+            if (intent.resolveActivity(activity.packageManager) != null) {
+                activity.startActivity(intent)
+                Toast.makeText(
+                    activity,
+                    "Please enable 'Install unknown apps' in the app settings",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                // Last resort: open main settings
+                val mainSettingsIntent = Intent(Settings.ACTION_SETTINGS).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                activity.startActivity(mainSettingsIntent)
+                Toast.makeText(
+                    activity,
+                    "Please go to Apps > BeatFetcher > Install unknown apps and enable it",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to open app info settings", e)
+            Toast.makeText(
+                activity,
+                "Please manually enable 'Install unknown apps' for BeatFetcher in Settings",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 
@@ -185,43 +247,64 @@ class UpdateManager @Inject constructor(
     }
 
     private fun installApk(activity: Activity, file: File) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val canInstall = activity.packageManager.canRequestPackageInstalls()
-            if (!canInstall) {
-                AlertDialog.Builder(activity)
-                    .setTitle("Enable install permission")
-                    .setMessage("To install updates, allow 'Install unknown apps' for BeatFetcher.")
-                    .setPositiveButton("Go to Settings") { _, _ ->
-                        try {
-                            shouldRetryAfterPermission = true
-                            val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
-                                data = Uri.parse("package:${'$'}{activity.packageName}")
-                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            }
-                            activity.startActivity(intent)
-                        } catch (e: ActivityNotFoundException) {
-                            Log.w(TAG, "Unknown app sources settings unavailable", e)
-                            Toast.makeText(activity, "Settings screen not available", Toast.LENGTH_SHORT).show()
-                        }
-                    }
-                    .setNegativeButton("Not now", null)
-                    .show()
-                // User must grant permission; ask them to retry
-                return
-            }
+        // Double-check permission before installation (Android 8.0+ / API 26+)
+        // Since app supports Android 10+, this check will always run
+        val canInstall = activity.packageManager.canRequestPackageInstalls()
+        if (!canInstall) {
+            Log.w(TAG, "Install permission not granted, showing dialog")
+            showInstallPermissionDialog(activity)
+            return
         }
 
         val authority = activity.packageName + ".fileProvider"
-        val contentUri = FileProvider.getUriForFile(activity, authority, file)
+        val contentUri = try {
+            FileProvider.getUriForFile(activity, authority, file)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to create FileProvider URI", e)
+            Toast.makeText(activity, "Failed to prepare update file", Toast.LENGTH_LONG).show()
+            return
+        }
+        
         val install = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(contentUri, APK_MIME)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            // For Android 7.0+ (API 24+), also grant write permission if needed
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
+            }
         }
+        
         try {
-            activity.startActivity(install)
+            // Verify that an app can handle this intent
+            if (install.resolveActivity(activity.packageManager) != null) {
+                activity.startActivity(install)
+                Log.d(TAG, "Install intent started successfully")
+            } else {
+                Log.e(TAG, "No app found to handle installation")
+                Toast.makeText(
+                    activity,
+                    "No app found to install the update. Please install manually from Downloads.",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: SecurityException) {
+            Log.e(TAG, "Security exception during installation - permission may have been revoked", e)
+            showInstallPermissionDialog(activity)
+        } catch (e: ActivityNotFoundException) {
+            Log.e(TAG, "No activity found to handle installation", e)
+            Toast.makeText(
+                activity,
+                "Cannot open installer. Please install the update manually from: ${file.absolutePath}",
+                Toast.LENGTH_LONG
+            ).show()
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start installer", e)
+            Toast.makeText(
+                activity,
+                "Failed to install update: ${e.message}. Please try installing manually.",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
 }

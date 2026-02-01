@@ -388,7 +388,13 @@ class AudioDownloadService @Inject constructor(
             val displayName = "${safeTitle}.$ext"
             val values = ContentValues().apply {
                 put(MediaStore.Audio.Media.DISPLAY_NAME, displayName)
+                put(MediaStore.Audio.Media.TITLE, title)
+                put(MediaStore.Audio.Media.IS_MUSIC, 1)
                 put(MediaStore.Audio.Media.MIME_TYPE, "audio/mp4")
+                // Seconds since epoch (MediaStore expects seconds for DATE_* columns)
+                val nowSec = (System.currentTimeMillis() / 1000L)
+                put(MediaStore.Audio.Media.DATE_ADDED, nowSec)
+                put(MediaStore.Audio.Media.DATE_MODIFIED, nowSec)
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     // Save at top-level Music folder (no app subdirectory)
                     put(MediaStore.Audio.Media.RELATIVE_PATH, Environment.DIRECTORY_MUSIC)

@@ -41,6 +41,9 @@ import com.example.youtubetomp3.data.appDataStore
 import android.provider.MediaStore
 import android.content.ContentUris
 import javax.inject.Inject
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import org.json.JSONObject
 
  
 
@@ -50,6 +53,7 @@ class MainViewModel @Inject constructor(
     private val audioPlayerService: AudioPlayerService,
     private val audioDownloadService: AudioDownloadService,
     private val newPipeLinkProcessor: NewPipeLinkProcessor,
+    private val httpClient: OkHttpClient,
     @ApplicationContext private val context: Context
 ) : ViewModel() {
 
@@ -81,6 +85,8 @@ class MainViewModel @Inject constructor(
     private val KEY_LAST_POS = longPreferencesKey("last_pos_ms")
     private var lastPersistedPath: String? = null
     private var lastPersistedPos: Long = -1L
+
+    private val KEY_LIBRARY_MOODS_JSON = stringPreferencesKey("library_moods_json")
 
     companion object {
         private const val NOTIFICATION_ID = 1
@@ -162,7 +168,13 @@ class MainViewModel @Inject constructor(
             try {
                 audioPlayerService.events.collect { ev ->
                     when (ev) {
-                        is com.example.youtubetomp3.service.AudioPlayerService.PlayerEvent.TrackEnded -> playNext()
+                        is com.example.youtubetomp3.service.AudioPlayerService.PlayerEvent.TrackEnded -> {
+                            // Prefer ExoPlayer's next when available; otherwise fall back to our computed queue.
+                            playNext()
+                        }
+                        is com.example.youtubetomp3.service.AudioPlayerService.PlayerEvent.AutoClosed -> {
+                            // Handle auto-closed event
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -275,6 +287,16 @@ class MainViewModel @Inject constructor(
                 } catch (e: Exception) {
                     Log.w("MainViewModel", "NewPipe metadata fetch failed, using fallback", e)
                     "YouTube Video ($videoId)"
+                }
+
+                val thumbnailUrl = try {
+                    val info = withContext(Dispatchers.IO) {
+                        val handler = newPipeLinkProcessor.normalizeVideoUrl(youtubeUrl)
+                        newPipeLinkProcessor.fetchStreamInfo(handler.url)
+                    }
+                    info.thumbnails?.firstOrNull()?.url
+                } catch (_: Exception) {
+                    null
                 }
                 Log.d("MainViewModel", "Video title: ${videoTitle}")
                 updateProgressNotification("Preparing conversion", null, indeterminate = true)
@@ -419,7 +441,7 @@ class MainViewModel @Inject constructor(
                     filePath = filePath,
                     fileSize = getFileSize(filePath),
                     youtubeUrl = youtubeUrl,
-                    thumbnailUrl = null
+                    thumbnailUrl = thumbnailUrl
                 )
                 
                 try {
@@ -596,8 +618,17 @@ class MainViewModel @Inject constructor(
         Log.d("MainViewModel", "Playing audio: $filePath")
         viewModelScope.launch {
             try {
-                // If the requested file is already the current item and playback is paused, resume instead of rebuilding the queue
-                if (uiState.value.currentlyPlayingPath == filePath && !uiState.value.isPlaying) {
+                // Resume only if the underlying player has the same item loaded.
+                // After app relaunch, UI may restore `currentlyPlayingPath` but ExoPlayer has no media item prepared yet.
+                val canResume = try {
+                    val player = audioPlayerService.getPlayer()
+                    val curUri = player?.currentMediaItem?.localConfiguration?.uri?.toString()
+                    uiState.value.currentlyPlayingPath == filePath && !uiState.value.isPlaying && curUri == filePath
+                } catch (_: Exception) {
+                    false
+                }
+
+                if (canResume) {
                     Log.d("MainViewModel", "Resuming existing audio instead of re-queueing: $filePath")
                     audioPlayerService.resumeAudio()
                     // Re-apply preferences in case they changed while paused
@@ -607,19 +638,151 @@ class MainViewModel @Inject constructor(
                 }
 
                 val lib = uiState.value.librarySongs.map { it.uri }
-                val dls = uiState.value.downloads.map { it.filePath }
-                val list = if (lib.contains(filePath)) lib else dls
+                val downloads = uiState.value.downloads
+                val isLibrary = lib.contains(filePath)
+
+                // Mood-based queue for downloads: if the chosen track has a moodTag, prefer that mood first.
+                val list = if (isLibrary) {
+                    lib
+                } else {
+                    val picked = downloads.find { it.filePath == filePath }
+                    val mood = picked?.moodTag?.takeIf { !it.isNullOrBlank() }
+                    if (mood != null) {
+                        val sameMood = downloads.filter { it.filePath != filePath && it.moodTag.equals(mood, ignoreCase = true) }
+                        val other = downloads.filter { it.filePath != filePath && !it.moodTag.equals(mood, ignoreCase = true) }
+                        listOf(filePath) + sameMood.map { it.filePath } + other.map { it.filePath }
+                    } else {
+                        downloads.map { it.filePath }
+                    }
+                }
+
                 val idx = list.indexOf(filePath).let { if (it < 0) 0 else it }
                 // Build full queue so notification prev/next work
                 audioPlayerService.setQueue(list, idx)
                 // Apply current shuffle/repeat preferences to player
                 audioPlayerService.setShuffle(uiState.value.shuffleEnabled)
                 audioPlayerService.setRepeatOne(uiState.value.repeatOne)
+
+                // If this is an app-downloaded item, repair title metadata and fetch thumbnail artwork.
+                val dlMatch = uiState.value.downloads.find { it.filePath == filePath }
+                if (dlMatch != null) {
+                    repairMediaStoreMetadataIfNeeded(dlMatch)
+                    dlMatch.thumbnailUrl?.let { thumb ->
+                        val bytes = fetchImageBytes(thumb)
+                        if (bytes != null && bytes.isNotEmpty()) {
+                            audioPlayerService.setCurrentArtwork(bytes)
+                        }
+                    }
+                }
                 Log.d("MainViewModel", "Audio queue set and playback started at index=$idx")
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Failed to play audio", e)
                 _uiState.update { it.copy(error = "Failed to play audio: ${e.message}") }
             }
+        }
+    }
+
+    fun playNextFor(filePath: String) {
+        audioPlayerService.playNextInQueue(filePath)
+    }
+
+    fun addToQueue(filePath: String) {
+        audioPlayerService.addToQueue(filePath)
+    }
+
+    fun updateDownloadMoodTag(downloadId: Long, moodTag: String?) {
+        viewModelScope.launch {
+            try {
+                val dl = downloadRepository.getDownloadById(downloadId) ?: return@launch
+                val normalized = moodTag?.trim()?.takeIf { it.isNotBlank() }
+                downloadRepository.updateDownload(dl.copy(moodTag = normalized))
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Failed to update mood tag", e)
+                _uiState.update { it.copy(error = "Failed to update mood: ${e.message}") }
+            }
+        }
+    }
+
+    suspend fun getLibraryMoodTag(uri: String): String? {
+        return try {
+            val json = context.appDataStore.data.first()[KEY_LIBRARY_MOODS_JSON] ?: return null
+            val obj = JSONObject(json)
+            obj.optString(uri, "").trim().ifBlank { null }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun setLibraryMoodTag(uri: String, moodTag: String?) {
+        val normalized = moodTag?.trim()?.takeIf { it.isNotBlank() }
+        viewModelScope.launch {
+            try {
+                context.appDataStore.edit { prefs ->
+                    val cur = prefs[KEY_LIBRARY_MOODS_JSON]
+                    val obj = try { JSONObject(cur ?: "{}") } catch (_: Exception) { JSONObject() }
+                    if (normalized == null) {
+                        obj.remove(uri)
+                    } else {
+                        obj.put(uri, normalized)
+                    }
+                    prefs[KEY_LIBRARY_MOODS_JSON] = obj.toString()
+                }
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Failed to set library mood tag", e)
+                _uiState.update { it.copy(error = "Failed to update mood: ${e.message}") }
+            }
+        }
+    }
+
+    fun deleteLibrarySong(uri: String) {
+        viewModelScope.launch {
+            try {
+                val parsed = try { Uri.parse(uri) } catch (_: Exception) { null }
+                if (parsed == null) {
+                    _uiState.update { it.copy(error = "Invalid track uri") }
+                    return@launch
+                }
+                val deleted = withContext(Dispatchers.IO) {
+                    try { context.contentResolver.delete(parsed, null, null) } catch (_: Exception) { 0 }
+                }
+                if (deleted <= 0) {
+                    _uiState.update { it.copy(error = "Unable to delete track (permission denied or file not found)") }
+                    return@launch
+                }
+                // Refresh library
+                scanLibrary(force = true)
+            } catch (e: Exception) {
+                Log.e("MainViewModel", "Failed to delete library song", e)
+                _uiState.update { it.copy(error = "Failed to delete track: ${e.message}") }
+            }
+        }
+    }
+
+    private suspend fun fetchImageBytes(url: String): ByteArray? = withContext(Dispatchers.IO) {
+        try {
+            val req = Request.Builder().url(url).get().build()
+            httpClient.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@withContext null
+                resp.body?.bytes()
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun repairMediaStoreMetadataIfNeeded(download: DownloadItem) {
+        val uri = try { Uri.parse(download.filePath) } catch (_: Exception) { null } ?: return
+        if (!"content".equals(uri.scheme, ignoreCase = true)) return
+        try {
+            val values = android.content.ContentValues().apply {
+                put(MediaStore.Audio.Media.TITLE, download.title)
+                if (!download.artist.isNullOrBlank()) put(MediaStore.Audio.Media.ARTIST, download.artist)
+                put(MediaStore.Audio.Media.IS_MUSIC, 1)
+            }
+            withContext(Dispatchers.IO) {
+                context.contentResolver.update(uri, values, null, null)
+            }
+        } catch (_: Exception) {
         }
     }
     
@@ -688,11 +851,38 @@ class MainViewModel @Inject constructor(
     }
 
     fun playNext() {
-        audioPlayerService.skipToNext()
+        val player = try { audioPlayerService.getPlayer() } catch (_: Exception) { null }
+        val hasNext = try { player?.hasNextMediaItem() == true } catch (_: Exception) { false }
+        if (hasNext) {
+            audioPlayerService.skipToNext()
+            return
+        }
+
+        // Fallback: compute next index from our current list
+        val list = currentList()
+        val idx = currentIndex()
+        Log.d("MainViewModel", "No next media item reported by player. Falling back. listSize=${list.size} curIdx=${idx}")
+        if (list.isEmpty()) return
+        val nextIdx = if (idx == null) 0 else (idx + 1).coerceAtMost(list.lastIndex)
+        // If we are already at the end, restart at 0 (continuous playback)
+        val target = if (idx != null && idx >= list.lastIndex) 0 else nextIdx
+        playIndex(target)
     }
 
     fun playPrevious() {
-        audioPlayerService.skipToPrevious()
+        val player = try { audioPlayerService.getPlayer() } catch (_: Exception) { null }
+        val hasPrev = try { player?.hasPreviousMediaItem() == true } catch (_: Exception) { false }
+        if (hasPrev) {
+            audioPlayerService.skipToPrevious()
+            return
+        }
+
+        val list = currentList()
+        val idx = currentIndex()
+        Log.d("MainViewModel", "No previous media item reported by player. Falling back. listSize=${list.size} curIdx=${idx}")
+        if (list.isEmpty()) return
+        val target = if (idx == null) 0 else (idx - 1).coerceAtLeast(0)
+        playIndex(target)
     }
 
     fun seekToPercent(percent: Float) {
@@ -745,18 +935,60 @@ class MainViewModel @Inject constructor(
     
     // Simple video ID extraction without API
     private fun extractVideoId(url: String): String? {
-        val patterns = listOf(
-            Regex("(?:youtube\\.com/watch\\?v=|youtu\\.be/|youtube\\.com/embed/)([^&?/]+)"),
-            Regex("youtube\\.com/watch\\?.*v=([^&]+)"),
-            Regex("youtu\\.be/([^?]+)")
-        )
-        
-        for (pattern in patterns) {
-            val match = pattern.find(url)
-            if (match != null) {
-                return match.groupValues[1]
+        val trimmed = url.trim()
+        if (trimmed.isBlank()) return null
+
+        val idRegex = Regex("^[A-Za-z0-9_-]{11}$")
+        fun normalizeCandidate(candidate: String?): String? {
+            val c = candidate?.trim()?.takeIf { it.isNotBlank() } ?: return null
+            return if (idRegex.matches(c)) c else null
+        }
+
+        // If user already pasted a plain videoId
+        normalizeCandidate(trimmed)?.let { return it }
+
+        // Try parsing as Uri first (more reliable than regex)
+        val uri = try { Uri.parse(trimmed) } catch (_: Exception) { null }
+        if (uri != null) {
+            // https://www.youtube.com/watch?v=VIDEO_ID
+            normalizeCandidate(uri.getQueryParameter("v"))?.let { return it }
+
+            val host = (uri.host ?: "").lowercase()
+            val pathSegments = uri.pathSegments ?: emptyList()
+
+            // https://youtu.be/VIDEO_ID
+            if (host.endsWith("youtu.be") && pathSegments.isNotEmpty()) {
+                normalizeCandidate(pathSegments.firstOrNull())?.let { return it }
+            }
+
+            // https://www.youtube.com/shorts/VIDEO_ID
+            val shortsIdx = pathSegments.indexOfFirst { it.equals("shorts", ignoreCase = true) }
+            if (shortsIdx != -1 && pathSegments.size > shortsIdx + 1) {
+                normalizeCandidate(pathSegments[shortsIdx + 1])?.let { return it }
+            }
+
+            // https://www.youtube.com/embed/VIDEO_ID
+            val embedIdx = pathSegments.indexOfFirst { it.equals("embed", ignoreCase = true) }
+            if (embedIdx != -1 && pathSegments.size > embedIdx + 1) {
+                normalizeCandidate(pathSegments[embedIdx + 1])?.let { return it }
             }
         }
+
+        // Fallback regexes (also covers music.youtube.com)
+        val patterns = listOf(
+            Regex("(?:youtube\\.com|music\\.youtube\\.com)/watch\\?.*?[?&]v=([A-Za-z0-9_-]{11})"),
+            Regex("youtu\\.be/([A-Za-z0-9_-]{11})"),
+            Regex("youtube\\.com/shorts/([A-Za-z0-9_-]{11})"),
+            Regex("youtube\\.com/embed/([A-Za-z0-9_-]{11})")
+        )
+
+        for (pattern in patterns) {
+            val match = pattern.find(trimmed)
+            if (match != null) {
+                normalizeCandidate(match.groupValues[1])?.let { return it }
+            }
+        }
+
         return null
     }
 

@@ -17,9 +17,15 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitLongPressOrCancellation
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.material3.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
@@ -32,10 +38,12 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -50,6 +58,10 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.animateFloat
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.foundation.Image
 import androidx.compose.ui.res.painterResource
@@ -60,10 +72,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.draw.clipToBounds
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asComposeRenderEffect
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.core.content.ContextCompat
 import androidx.hilt.navigation.compose.hiltViewModel
@@ -86,15 +104,427 @@ import com.example.youtubetomp3.util.formatTime
 import com.example.youtubetomp3.data.DownloadItem
 import com.example.youtubetomp3.ui.YouTubePlayerPreview
 import com.example.youtubetomp3.util.UpdateManager
+import com.example.youtubetomp3.util.AppearanceBridge
 import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
     companion object {
         // GitHub owner/repo for in-app update release checks
-        private const val GITHUB_OWNER = "YOUR_GITHUB_NAME"
-        private const val GITHUB_REPO = "YOUR_REPO_NAME"
+        private const val GITHUB_OWNER = "EnDeRTiGeR"
+        private const val GITHUB_REPO = "BeatFetcher"
     }
+
+private enum class BeatFetcherMode {
+    Extractor,
+    MediaSession
+}
+
+private data class AppModeTransition(
+    val from: BeatFetcherMode,
+    val to: BeatFetcherMode
+)
+
+private data class ThemeVariantTransition(
+    val fromDark: Boolean,
+    val toDark: Boolean
+)
+
+private fun lerpScheme(a: ColorScheme, b: ColorScheme, t: Float): ColorScheme {
+    val f = t.coerceIn(0f, 1f)
+    return a.copy(
+        primary = androidx.compose.ui.graphics.lerp(a.primary, b.primary, f),
+        onPrimary = androidx.compose.ui.graphics.lerp(a.onPrimary, b.onPrimary, f),
+        secondary = androidx.compose.ui.graphics.lerp(a.secondary, b.secondary, f),
+        onSecondary = androidx.compose.ui.graphics.lerp(a.onSecondary, b.onSecondary, f),
+        background = androidx.compose.ui.graphics.lerp(a.background, b.background, f),
+        onBackground = androidx.compose.ui.graphics.lerp(a.onBackground, b.onBackground, f),
+        surface = androidx.compose.ui.graphics.lerp(a.surface, b.surface, f),
+        onSurface = androidx.compose.ui.graphics.lerp(a.onSurface, b.onSurface, f),
+        surfaceVariant = androidx.compose.ui.graphics.lerp(a.surfaceVariant, b.surfaceVariant, f),
+        onSurfaceVariant = androidx.compose.ui.graphics.lerp(a.onSurfaceVariant, b.onSurfaceVariant, f),
+        outline = androidx.compose.ui.graphics.lerp(a.outline, b.outline, f),
+        error = androidx.compose.ui.graphics.lerp(a.error, b.error, f),
+        onError = androidx.compose.ui.graphics.lerp(a.onError, b.onError, f),
+        errorContainer = androidx.compose.ui.graphics.lerp(a.errorContainer, b.errorContainer, f),
+        onErrorContainer = androidx.compose.ui.graphics.lerp(a.onErrorContainer, b.onErrorContainer, f)
+    )
+}
+
+private fun contentColorFor(bg: Color): Color {
+    return if (bg.luminance() > 0.42f) Color(0xFF0F172A) else Color(0xFFE2E8F0)
+}
+
+private fun schemeFromModeColor(modeColor: Color, dark: Boolean): ColorScheme {
+    // No pure white/black identities: everything is tinted off the mode color.
+    val lightBase = Color(0xFFF3F5FA)
+    val darkBase = Color(0xFF0B1020)
+
+    val background = if (dark) androidx.compose.ui.graphics.lerp(darkBase, modeColor, 0.12f) else androidx.compose.ui.graphics.lerp(lightBase, modeColor, 0.14f)
+    val surface = if (dark) androidx.compose.ui.graphics.lerp(darkBase, modeColor, 0.18f) else androidx.compose.ui.graphics.lerp(lightBase, modeColor, 0.10f)
+    val surfaceVariant = if (dark) androidx.compose.ui.graphics.lerp(darkBase, modeColor, 0.28f) else androidx.compose.ui.graphics.lerp(lightBase, modeColor, 0.22f)
+
+    val onBackground = contentColorFor(background)
+    val onSurface = contentColorFor(surface)
+    val onSurfaceVariant = contentColorFor(surfaceVariant)
+
+    val primary = if (dark) androidx.compose.ui.graphics.lerp(modeColor, Color.White, 0.18f) else modeColor
+    val secondary = if (dark) androidx.compose.ui.graphics.lerp(modeColor, Color.White, 0.10f) else androidx.compose.ui.graphics.lerp(modeColor, Color(0xFF0F172A), 0.08f)
+
+    val outline = if (dark) androidx.compose.ui.graphics.lerp(surfaceVariant, Color.White, 0.18f) else androidx.compose.ui.graphics.lerp(surfaceVariant, Color(0xFF0F172A), 0.18f)
+
+    val error = if (dark) Color(0xFFFCA5A5) else Color(0xFFB91C1C)
+    val errorContainer = if (dark) Color(0xFF7F1D1D) else Color(0xFFFEE2E2)
+    val onError = contentColorFor(error)
+    val onErrorContainer = contentColorFor(errorContainer)
+
+    return if (dark) {
+        darkColorScheme(
+            primary = primary,
+            onPrimary = contentColorFor(primary),
+            secondary = secondary,
+            onSecondary = contentColorFor(secondary),
+            background = background,
+            onBackground = onBackground,
+            surface = surface,
+            onSurface = onSurface,
+            surfaceVariant = surfaceVariant,
+            onSurfaceVariant = onSurfaceVariant,
+            outline = outline,
+            error = error,
+            onError = onError,
+            errorContainer = errorContainer,
+            onErrorContainer = onErrorContainer
+        )
+    } else {
+        lightColorScheme(
+            primary = primary,
+            onPrimary = contentColorFor(primary),
+            secondary = secondary,
+            onSecondary = contentColorFor(secondary),
+            background = background,
+            onBackground = onBackground,
+            surface = surface,
+            onSurface = onSurface,
+            surfaceVariant = surfaceVariant,
+            onSurfaceVariant = onSurfaceVariant,
+            outline = outline,
+            error = error,
+            onError = onError,
+            errorContainer = errorContainer,
+            onErrorContainer = onErrorContainer
+        )
+    }
+}
+
+@Composable
+private fun BeatFetcherTwoModeHost(
+    mode: BeatFetcherMode,
+    transition: AppModeTransition?,
+    transitionProgress: Float,
+    inputLocked: Boolean,
+    onRequestMode: (BeatFetcherMode) -> Unit,
+    isDarkVariant: Boolean,
+    onRequestThemeVariant: (Boolean) -> Boolean,
+    themeIndicatorDark: Boolean?,
+    extractor: @Composable () -> Unit,
+    mediaSession: @Composable () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+
+    Surface(
+        modifier = Modifier.fillMaxSize(),
+        color = MaterialTheme.colorScheme.background
+    ) {
+        Box(modifier = Modifier.fillMaxSize()) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                PersistentWaveHeader(
+                    mode = mode,
+                    transition = transition,
+                    transitionProgress = transitionProgress,
+                    inputLocked = inputLocked,
+                    isDarkVariant = isDarkVariant,
+                    onRequestThemeVariant = onRequestThemeVariant,
+                    themeIndicatorDark = themeIndicatorDark,
+                    onSingleTap = {
+                        haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                        onRequestMode(BeatFetcherMode.MediaSession)
+                    },
+                    onDoubleTap = {
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onRequestMode(BeatFetcherMode.Extractor)
+                    }
+                )
+                Box(modifier = Modifier.weight(1f)) {
+                    val fusionOverlap = 18.dp
+                    when (mode) {
+                        BeatFetcherMode.Extractor -> {
+                            Box(modifier = Modifier.offset(y = -fusionOverlap)) {
+                                extractor()
+                            }
+                        }
+                        BeatFetcherMode.MediaSession -> {
+                            Box(modifier = Modifier.offset(y = -(fusionOverlap + 12.dp))) {
+                                mediaSession()
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (inputLocked) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            awaitEachGesture {
+                                awaitFirstDown(pass = PointerEventPass.Initial)
+                                while (waitForUpOrCancellation(pass = PointerEventPass.Initial) != null) { }
+                            }
+                        }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PersistentWaveHeader(
+    mode: BeatFetcherMode,
+    transition: AppModeTransition?,
+    transitionProgress: Float,
+    inputLocked: Boolean,
+    isDarkVariant: Boolean,
+    onRequestThemeVariant: (Boolean) -> Boolean,
+    themeIndicatorDark: Boolean?,
+    onSingleTap: () -> Unit,
+    onDoubleTap: () -> Unit,
+) {
+    val haptics = LocalHapticFeedback.current
+    val structureColor = MaterialTheme.colorScheme.primary
+    val isTransitioning = transition != null
+    val direction = remember(transition) {
+        val tr = transition
+        if (tr == null) 0f else if (tr.from == BeatFetcherMode.Extractor && tr.to == BeatFetcherMode.MediaSession) 1f else -1f
+    }
+
+    val infinite = rememberInfiniteTransition(label = "waves")
+    val idlePhase by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = (Math.PI * 2.0).toFloat(),
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 4200, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "idlePhase"
+    )
+
+    val inferredDark = MaterialTheme.colorScheme.background.luminance() < 0.36f
+    val baseThemeBoost = if (inferredDark) 1.03f else 1.00f
+    val waveBoost = if (isTransitioning) {
+        val p = transitionProgress
+        val peak = 1.0f + (0.35f * (1f - kotlin.math.abs(2f * p - 1f)))
+        peak
+    } else baseThemeBoost
+
+    val sweep = if (isTransitioning) direction * (transitionProgress * (Math.PI * 2.0).toFloat()) else 0f
+    val phase = idlePhase + sweep
+
+    val headerHeight = 104.dp
+    val mediaHeaderExtra = 16.dp
+    val fusionHeight = 18.dp
+    val resolvedHeaderHeight = (if (mode == BeatFetcherMode.MediaSession) headerHeight + mediaHeaderExtra else headerHeight) + fusionHeight
+    val buttonSize = 34.dp
+    val buttonOffsetY = 12.dp
+    val indicator = themeIndicatorDark
+
+    val density = LocalDensity.current
+    val themeSwipeThresholdPx = remember(density) { with(density) { 22.dp.toPx() } }
+
+    val indicatorAlpha = remember { Animatable(0f) }
+    val indicatorScale = remember { Animatable(0.92f) }
+    LaunchedEffect(indicator) {
+        if (indicator != null) {
+            indicatorAlpha.snapTo(0f)
+            indicatorScale.snapTo(0.92f)
+            indicatorAlpha.animateTo(1f, animationSpec = tween(durationMillis = 90, easing = LinearEasing))
+            indicatorScale.animateTo(1f, animationSpec = tween(durationMillis = 140, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+            kotlinx.coroutines.delay(220)
+            indicatorAlpha.animateTo(0f, animationSpec = tween(durationMillis = 220, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+            indicatorScale.animateTo(0.92f, animationSpec = tween(durationMillis = 220, easing = androidx.compose.animation.core.FastOutSlowInEasing))
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(resolvedHeaderHeight)
+            .drawBehind {
+                val bgAlpha = if (inferredDark) 0.12f else 0.10f
+                drawRect(color = structureColor.copy(alpha = bgAlpha))
+            }
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+    ) {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val buttonCenterY = (h / 2f) + buttonOffsetY.toPx()
+            val centerY = buttonCenterY - 12.dp.toPx()
+            val gap = 18.dp.toPx()
+            val buttonRadius = buttonSize.toPx() / 2f
+            val cx = w / 2f
+
+            val leftEnd = (cx - buttonRadius - gap).coerceAtLeast(0f)
+            val rightStart = (cx + buttonRadius + gap).coerceAtMost(w)
+
+            val baseAmp = h * 0.10f
+            val amp = baseAmp * waveBoost
+            val strokeBase = (h * 0.07f).coerceAtLeast(2.5f)
+
+            fun drawWaveBand(x0: Float, x1: Float, mirror: Boolean) {
+                if (x1 <= x0) return
+                val span = (x1 - x0)
+                val steps = 46
+                val dx = span / steps
+
+                val weights = floatArrayOf(1.00f, 0.72f, 0.46f)
+                val freqs = floatArrayOf(1.45f, 1.15f, 0.92f)
+                val yOffsets = floatArrayOf(-h * 0.06f, 0f, h * 0.06f)
+
+                for (i in 0 until 3) {
+                    val path = androidx.compose.ui.graphics.Path()
+                    val a = amp * weights[i]
+                    val f = freqs[i]
+                    val y0 = centerY + yOffsets[i]
+                    val phaseOffset = phase + (i * 0.85f)
+
+                    val convergeTargetY = buttonCenterY + (i - 1) * 5.dp.toPx()
+                    val convergeSpanPx = 42.dp.toPx()
+
+                    for (s in 0..steps) {
+                        val x = x0 + s * dx
+                        val t = (x - x0) / span
+                        val local = if (mirror) (1f - t) else t
+                        val rawY = y0 + a * kotlin.math.sin((local * Math.PI.toFloat() * 2f * f) + phaseOffset)
+
+                        val distToCircleEdge = if (!mirror) (x1 - x) else (x - x0)
+                        val convergeT = ((convergeSpanPx - distToCircleEdge) / convergeSpanPx).coerceIn(0f, 1f)
+                        val easedConverge = convergeT * convergeT * (3f - 2f * convergeT)
+                        val y = rawY + (convergeTargetY - rawY) * easedConverge
+                        if (s == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                    }
+
+                    val alpha = 0.70f - (i * 0.16f)
+                    drawPath(
+                        path = path,
+                        color = structureColor.copy(alpha = alpha),
+                        style = Stroke(width = strokeBase * (1f - i * 0.18f), cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                    )
+                }
+            }
+
+            drawWaveBand(0f, leftEnd, mirror = false)
+            drawWaveBand(rightStart, w, mirror = true)
+        }
+
+        val headerBg = structureColor.copy(alpha = if (inferredDark) 0.12f else 0.10f)
+        val bg = MaterialTheme.colorScheme.background
+        val blurRadiusPx = remember(density) { with(density) { 5.dp.toPx() } }
+        Box(
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .height(fusionHeight)
+                .graphicsLayer {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        renderEffect = RenderEffect.createBlurEffect(
+                            blurRadiusPx,
+                            blurRadiusPx,
+                            Shader.TileMode.CLAMP
+                        ).asComposeRenderEffect()
+                    }
+                }
+                .background(
+                    brush = Brush.verticalGradient(
+                        colors = listOf(headerBg, bg),
+                        startY = 0f,
+                        endY = Float.POSITIVE_INFINITY
+                    )
+                )
+        )
+
+        Box(
+            modifier = Modifier
+                .align(Alignment.Center)
+                .offset(y = buttonOffsetY)
+                .size(buttonSize)
+                .clip(CircleShape)
+                .combinedClickable(
+                    onClick = {
+                        if (!inputLocked && mode == BeatFetcherMode.Extractor) onSingleTap()
+                    },
+                    onDoubleClick = {
+                        if (!inputLocked && mode == BeatFetcherMode.MediaSession) onDoubleTap()
+                    }
+                )
+                .pointerInput(isDarkVariant, inputLocked) {
+                    if (inputLocked) return@pointerInput
+                    var totalDy = 0f
+                    detectVerticalDragGestures(
+                        onVerticalDrag = { _, dy ->
+                            totalDy += dy
+                        },
+                        onDragEnd = {
+                            val targetDark = when {
+                                totalDy > themeSwipeThresholdPx -> true
+                                totalDy < -themeSwipeThresholdPx -> false
+                                else -> null
+                            }
+                            totalDy = 0f
+                            if (targetDark != null && targetDark != isDarkVariant) {
+                                val accepted = onRequestThemeVariant(targetDark)
+                                if (accepted) {
+                                    // Soft haptic confirmation on successful theme toggle.
+                                    haptics.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
+                            }
+                        }
+                    )
+                }
+                .drawBehind {
+                    drawCircle(color = structureColor.copy(alpha = 0.10f))
+                    drawCircle(color = structureColor.copy(alpha = 0.55f), style = Stroke(width = 1.dp.toPx()))
+                },
+            contentAlignment = Alignment.Center
+        ) {
+            val dot = MaterialTheme.colorScheme.onSurface
+            Canvas(modifier = Modifier.size(18.dp)) {
+                drawCircle(color = dot.copy(alpha = 0.35f))
+            }
+        }
+
+        if (indicator != null) {
+            val text = if (indicator) "🌙" else "☀️"
+            Box(
+                modifier = Modifier
+                    .align(Alignment.Center)
+                    .offset(y = buttonOffsetY - 34.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = text,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.graphicsLayer {
+                        alpha = indicatorAlpha.value
+                        scaleX = indicatorScale.value
+                        scaleY = indicatorScale.value
+                    }
+                )
+            }
+        }
+    }
+}
     
     @Inject
     lateinit var githubUpdateManager: UpdateManager
@@ -197,23 +627,124 @@ private fun SplashScreen(progress: Float) {
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Handle initial launch intent (share/open-with)
+        handleIntent(intent)
         
         setContent {
             val context = LocalContext.current
-            var useDarkTheme by rememberSaveable { mutableStateOf(false) }
-            MaterialTheme(colorScheme = if (useDarkTheme) darkColorScheme() else lightColorScheme()) {
+            var isDarkVariant by rememberSaveable { mutableStateOf(false) }
+
+            var mode by rememberSaveable { mutableStateOf(BeatFetcherMode.Extractor) }
+            var transition by remember { mutableStateOf<AppModeTransition?>(null) }
+            val transitionProgress = remember { Animatable(0f) }
+            var inputLocked by remember { mutableStateOf(false) }
+
+            var themeTransition by remember { mutableStateOf<ThemeVariantTransition?>(null) }
+            val themeProgress = remember { Animatable(1f) }
+            var themeLocked by remember { mutableStateOf(false) }
+            var themeIndicatorDark by remember { mutableStateOf<Boolean?>(null) }
+
+            val extractorModeColor = Color(0xFF7C3AED)
+            val mediaModeColor = Color(0xFF2563EB)
+
+            val fromModeColor = remember(transition, mode) {
+                val tr = transition
+                val from = tr?.from ?: mode
+                if (from == BeatFetcherMode.Extractor) extractorModeColor else mediaModeColor
+            }
+            val toModeColor = remember(transition, mode) {
+                val tr = transition
+                val to = tr?.to ?: mode
+                if (to == BeatFetcherMode.Extractor) extractorModeColor else mediaModeColor
+            }
+            val modeColor = if (transition != null) androidx.compose.ui.graphics.lerp(fromModeColor, toModeColor, transitionProgress.value) else fromModeColor
+
+            val fromVariantDark = themeTransition?.fromDark ?: isDarkVariant
+            val toVariantDark = themeTransition?.toDark ?: isDarkVariant
+            val fromVariantScheme = schemeFromModeColor(modeColor, fromVariantDark)
+            val toVariantScheme = schemeFromModeColor(modeColor, toVariantDark)
+            val scheme = if (themeTransition != null) lerpScheme(fromVariantScheme, toVariantScheme, themeProgress.value) else fromVariantScheme
+
+            LaunchedEffect(scheme) {
+                AppearanceBridge.updateFromScheme(scheme)
+            }
+
+            MaterialTheme(colorScheme = scheme) {
                 var showSplash by remember { mutableStateOf(true) }
                 var progress by remember { mutableStateOf(0f) }
-                var selected by rememberSaveable { mutableStateOf(0) }
-                val drawerState = androidx.compose.material3.rememberDrawerState(initialValue = androidx.compose.material3.DrawerValue.Closed)
-                val scope = rememberCoroutineScope()
+
+                // If a URL is shared while the app is on the Player screen, force navigation to Fetcher.
+                LaunchedEffect(Unit) {
+                    mainViewModel.sharedUrlEvents.collect { newUrl ->
+                        if (!newUrl.isNullOrBlank()) {
+                            mode = BeatFetcherMode.Extractor
+                        }
+                    }
+                }
+
+                fun requestMode(target: BeatFetcherMode) {
+                    if (inputLocked) return
+                    if (target == mode) return
+                    transition = AppModeTransition(from = mode, to = target)
+                    inputLocked = true
+                }
+
+                fun requestThemeVariant(targetDark: Boolean): Boolean {
+                    if (inputLocked) return false
+                    if (themeLocked) return false
+                    if (targetDark == isDarkVariant) return false
+                    themeLocked = true
+                    themeTransition = ThemeVariantTransition(fromDark = isDarkVariant, toDark = targetDark)
+                    themeIndicatorDark = targetDark
+                    return true
+                }
+
+                LaunchedEffect(themeTransition) {
+                    val tr = themeTransition ?: return@LaunchedEffect
+                    try {
+                        themeProgress.snapTo(0f)
+                        themeProgress.animateTo(
+                            targetValue = 1f,
+                            animationSpec = tween(durationMillis = 280, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                        )
+                        isDarkVariant = tr.toDark
+                        try {
+                            (context.applicationContext as android.content.Context).appDataStore.edit {
+                                it[booleanPreferencesKey("theme_dark")] = tr.toDark
+                            }
+                        } catch (_: Exception) { }
+                        kotlinx.coroutines.delay(520)
+                    } finally {
+                        themeIndicatorDark = null
+                        themeTransition = null
+                        themeProgress.snapTo(1f)
+                        themeLocked = false
+                    }
+                }
+
+                LaunchedEffect(transition) {
+                    val tr = transition ?: return@LaunchedEffect
+                    try {
+                        transitionProgress.snapTo(0f)
+                        kotlinx.coroutines.delay(500)
+                        transitionProgress.animateTo(
+                            targetValue = 1f,
+                            animationSpec = tween(durationMillis = 1500, easing = androidx.compose.animation.core.FastOutSlowInEasing)
+                        )
+                        mode = tr.to
+                    } finally {
+                        transition = null
+                        transitionProgress.snapTo(0f)
+                        inputLocked = false
+                    }
+                }
 
                 LaunchedEffect(Unit) {
                     // Load persisted theme and last section
                     try {
                         val prefs = (context.applicationContext as android.content.Context).appDataStore.data.first()
-                        useDarkTheme = prefs[booleanPreferencesKey("theme_dark")] ?: false
-                        selected = prefs[intPreferencesKey("last_section")] ?: 0
+                        isDarkVariant = prefs[booleanPreferencesKey("theme_dark")] ?: false
                     } catch (_: Exception) { }
                     val steps = 20
                     val intervalMs = 100L
@@ -251,93 +782,27 @@ private fun SplashScreen(progress: Float) {
                         SplashScreen(progress = progress)
                     }
                 } else {
-                    androidx.compose.material3.ModalNavigationDrawer(
-                        drawerState = drawerState,
-                        drawerContent = {
-                            androidx.compose.material3.ModalDrawerSheet {
-                                Spacer(Modifier.height(12.dp))
-                                androidx.compose.material3.NavigationDrawerItem(
-                                    label = { Text("Fetcher") },
-                                    selected = selected == 0,
-                                    onClick = {
-                                        selected = 0
-                                        scope.launch { drawerState.close() }
-                                        scope.launch {
-                                            (context.applicationContext as android.content.Context).appDataStore.edit { it[intPreferencesKey("last_section")] = 0 }
-                                        }
-                                    },
-                                    icon = { Icon(Icons.Default.ContentPaste, contentDescription = null) }
-                                )
-                                androidx.compose.material3.NavigationDrawerItem(
-                                    label = { Text("Player") },
-                                    selected = selected == 1,
-                                    onClick = {
-                                        selected = 1
-                                        scope.launch { drawerState.close() }
-                                        scope.launch {
-                                            (context.applicationContext as android.content.Context).appDataStore.edit { it[intPreferencesKey("last_section")] = 1 }
-                                        }
-                                    },
-                                    icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) }
-                                )
-                                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                                Text(
-                                    "Theme",
-                                    style = MaterialTheme.typography.labelMedium,
-                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
-                                )
-                                androidx.compose.material3.NavigationDrawerItem(
-                                    label = { Text("Light Theme") },
-                                    selected = !useDarkTheme,
-                                    onClick = {
-                                        useDarkTheme = false
-                                        scope.launch { (context.applicationContext as android.content.Context).appDataStore.edit { it[booleanPreferencesKey("theme_dark")] = false } }
-                                    },
-                                    icon = { Icon(Icons.Default.LightMode, contentDescription = null) }
-                                )
-                                androidx.compose.material3.NavigationDrawerItem(
-                                    label = { Text("Dark Theme") },
-                                    selected = useDarkTheme,
-                                    onClick = {
-                                        useDarkTheme = true
-                                        scope.launch { (context.applicationContext as android.content.Context).appDataStore.edit { it[booleanPreferencesKey("theme_dark")] = true } }
-                                    },
-                                    icon = { Icon(Icons.Default.DarkMode, contentDescription = null) }
-                                )
-                            }
+                    BeatFetcherTwoModeHost(
+                        mode = mode,
+                        transition = transition,
+                        transitionProgress = transitionProgress.value,
+                        inputLocked = inputLocked,
+                        onRequestMode = { target -> requestMode(target) },
+                        isDarkVariant = isDarkVariant,
+                        onRequestThemeVariant = { targetDark -> requestThemeVariant(targetDark) },
+                        themeIndicatorDark = themeIndicatorDark,
+                        extractor = {
+                            YouTubeToMP3Screen(
+                                onUrlEntered = { url -> handleUrlInput(url) },
+                                onFileSelected = { getContent.launch("*/*") },
+                                sharedUrl = extractYouTubeUrl(intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""),
+                                _onRequestPermissions = { requestStoragePermissions() }
+                            )
+                        },
+                        mediaSession = {
+                            MediaPlayerScreen()
                         }
-                    ) {
-                        androidx.compose.material3.Scaffold(
-                            topBar = {
-                                androidx.compose.material3.TopAppBar(
-                                    title = {},
-                                    navigationIcon = {
-                                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                                            Icon(Icons.Default.Menu, contentDescription = null)
-                                        }
-                                    }
-                                )
-                            }
-                        ) { innerPadding ->
-                            Surface(
-                                modifier = Modifier
-                                    .fillMaxSize()
-                                    .padding(innerPadding),
-                                color = MaterialTheme.colorScheme.background
-                            ) {
-                                if (selected == 0) {
-                                    YouTubeToMP3Screen(
-                                        onUrlEntered = { url -> handleUrlInput(url) },
-                                        onFileSelected = { getContent.launch("*/*") },
-                                        sharedUrl = extractYouTubeUrl(intent.getStringExtra(Intent.EXTRA_TEXT) ?: ""),
-                                        onRequestPermissions = { requestStoragePermissions() }
-                                    )
-                                } else {
-                                    MediaPlayerScreen()
-                                }
-                            }
-                        }
-                    }
+                    )
                 }
             }
         }
@@ -443,12 +908,13 @@ private fun SplashScreen(progress: Float) {
                     mainViewModel.onSharedUrlReceived(extracted)
                 }
             }
+            Intent.ACTION_VIEW -> {
+                val extracted = intent.dataString?.let { extractYouTubeUrl(it) }
+                if (!extracted.isNullOrBlank()) {
+                    mainViewModel.onSharedUrlReceived(extracted)
+                }
+            }
         }
-    }
-    
-    private fun handleSharedContent(content: String) {
-        // Pass the shared content to the Composable via intent
-        // No need to show a toast or process here
     }
     
     private fun extractYouTubeUrl(content: String): String? {
@@ -496,15 +962,17 @@ private fun SplashScreen(progress: Float) {
 @Composable
 @androidx.media3.common.util.UnstableApi
 @OptIn(ExperimentalFoundationApi::class)
+@Suppress("UNUSED_PARAMETER")
 fun YouTubeToMP3Screen(
     onUrlEntered: (String) -> Unit,
     onFileSelected: () -> Unit,
     sharedUrl: String? = null,
     viewModel: MainViewModel = hiltViewModel(),
-    onRequestPermissions: () -> Unit
+    _onRequestPermissions: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    @Suppress("DEPRECATION")
     val clipboard = LocalClipboardManager.current
     val ytRegex = remember { Regex("(https?://)?(www\\.)?(youtube\\.com|youtu\\.be)/[\\w\\-\\?=&]+") }
 
@@ -549,30 +1017,7 @@ fun YouTubeToMP3Screen(
             .padding(16.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (!isConverting) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(bottom = 8.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                AnimatedAccentBar(
-                    modifier = Modifier
-                        .padding(bottom = 16.dp),
-                    height = 32.dp,
-                    cornerRadius = 16.dp
-                ) {
-                    Text(
-                        text = "Fetching.. Beats of your choice",
-                        style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
-                    )
-                }
-            }
-        }
+
 
         // Internet Connectivity Status
         if (!isInternetAvailable) {
@@ -783,15 +1228,14 @@ fun YouTubeToMP3Screen(
             LazyColumn {
                 items(uiState.downloads.take(3)) { download ->
                     val isCurrent = uiState.currentlyPlayingPath == download.filePath
-                    DownloadItemCard(
+                    RecentDownloadCard(
                         download = download,
                         isPlaying = uiState.isPlaying && isCurrent,
                         positionMs = if (isCurrent) uiState.playbackPositionMs else 0L,
                         durationMs = if (isCurrent) uiState.playbackDurationMs else 0L,
                         onPlay = { viewModel.playAudio(download.filePath) },
                         onPause = { viewModel.pauseAudio() },
-                        onStop = { viewModel.stopAudio() },
-                        onDelete = { viewModel.deleteDownload(download.id) }
+                        onStop = { viewModel.stopAudio() }
                     )
                 }
             }
@@ -812,6 +1256,79 @@ fun YouTubeToMP3Screen(
                     modifier = Modifier.padding(16.dp),
                     color = MaterialTheme.colorScheme.onErrorContainer
                 )
+            }
+        }
+    }
+} 
+
+@Composable
+fun RecentDownloadCard(
+    download: DownloadItem,
+    isPlaying: Boolean,
+    positionMs: Long,
+    durationMs: Long,
+    onPlay: () -> Unit,
+    onPause: () -> Unit,
+    onStop: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = download.title,
+                    style = MaterialTheme.typography.titleSmall
+                )
+                Text(
+                    text = download.artist ?: "Unknown Artist",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Text(
+                    text = download.duration ?: "Unknown Duration",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                if (isPlaying) {
+                    Spacer(modifier = Modifier.height(4.dp))
+                    val progress = if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
+                    LinearProgressIndicator(
+                        progress = { progress },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(4.dp)
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = "${formatTime(positionMs)} / ${formatTime(durationMs)}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (isPlaying) {
+                    IconButton(onClick = onPause) {
+                        Icon(Icons.Default.Pause, contentDescription = "Pause")
+                    }
+                    IconButton(onClick = onStop) {
+                        Icon(Icons.Default.Stop, contentDescription = "Stop")
+                    }
+                } else {
+                    IconButton(onClick = onPlay) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = "Play")
+                    }
+                }
             }
         }
     }
@@ -871,6 +1388,7 @@ private fun AnimatedAccentBar(
  
 
 @Composable
+@OptIn(ExperimentalLayoutApi::class, ExperimentalFoundationApi::class)
 fun DownloadItemCard(
     download: DownloadItem,
     isPlaying: Boolean,
@@ -879,12 +1397,88 @@ fun DownloadItemCard(
     onPlay: () -> Unit,
     onPause: () -> Unit,
     onStop: () -> Unit,
+    onPlayNext: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onSetMood: (String?) -> Unit,
     onDelete: () -> Unit
 ) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    var moodDialogOpen by remember { mutableStateOf(false) }
+    var moodText by remember(download.id) { mutableStateOf(download.moodTag ?: "") }
+
+    if (moodDialogOpen) {
+        AlertDialog(
+            onDismissRequest = { moodDialogOpen = false },
+            title = { Text("Set Mood") },
+            text = {
+                Column {
+                    OutlinedTextField(
+                        value = moodText,
+                        onValueChange = { moodText = it },
+                        singleLine = true,
+                        label = { Text("Mood (e.g. Party, Chill)") },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    // Quick picks
+                    val picks = listOf("Party", "Happy", "Chill", "Sad", "Workout", "Romantic", "Focus", "Lofi", "Vibes", "Relax")
+                    FlowRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        picks.forEach { p ->
+                            AssistChip(
+                                onClick = { moodText = p },
+                                label = { Text(p) }
+                            )
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val v = moodText.trim().ifBlank { null }
+                        onSetMood(v)
+                        moodDialogOpen = false
+                    }
+                ) { Text("Save") }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        onSetMood(null)
+                        moodText = ""
+                        moodDialogOpen = false
+                    }
+                ) { Text("Clear") }
+            }
+        )
+    }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
             .padding(vertical = 4.dp)
+            .pointerInput(download.id) {
+                // Detect long-press anywhere on the card without consuming events,
+                // so IconButtons inside still receive clicks.
+                awaitEachGesture {
+                    val down = awaitFirstDown(
+                        requireUnconsumed = false,
+                        pass = PointerEventPass.Initial
+                    )
+                    val longPress = awaitLongPressOrCancellation(down.id)
+                    if (longPress != null) {
+                        menuExpanded = true
+                        // Wait for release/cancel before listening for next gesture
+                        waitForUpOrCancellation(pass = PointerEventPass.Initial)
+                    }
+                }
+            }
     ) {
         Row(
             modifier = Modifier
@@ -910,6 +1504,15 @@ fun DownloadItemCard(
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
 
+                download.moodTag?.takeIf { it.isNotBlank() }?.let { tag ->
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Mood: $tag",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
                 if (isPlaying) {
                     Spacer(modifier = Modifier.height(4.dp))
                     val progress = if (durationMs > 0L) (positionMs.toFloat() / durationMs.toFloat()).coerceIn(0f, 1f) else 0f
@@ -929,20 +1532,73 @@ fun DownloadItemCard(
             }
             
             Row {
+                // Primary play/pause affordance
                 if (isPlaying) {
                     IconButton(onClick = onPause) {
                         Icon(Icons.Default.Pause, contentDescription = "Pause")
-                    }
-                    IconButton(onClick = onStop) {
-                        Icon(Icons.Default.Stop, contentDescription = "Stop")
                     }
                 } else {
                     IconButton(onClick = onPlay) {
                         Icon(Icons.Default.PlayArrow, contentDescription = "Play")
                     }
                 }
-                IconButton(onClick = onDelete) {
-                    Icon(Icons.Default.Delete, contentDescription = "Delete")
+
+                Box {
+                    IconButton(onClick = { menuExpanded = true }) {
+                        Icon(Icons.Default.MoreVert, contentDescription = "More")
+                    }
+                    DropdownMenu(
+                        expanded = menuExpanded,
+                        onDismissRequest = { menuExpanded = false }
+                    ) {
+                        if (!isPlaying) {
+                            DropdownMenuItem(
+                                text = { Text("Play") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onPlay()
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Play Next") },
+                            onClick = {
+                                menuExpanded = false
+                                onPlayNext()
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Add to Queue") },
+                            onClick = {
+                                menuExpanded = false
+                                onAddToQueue()
+                            }
+                        )
+                        if (isPlaying) {
+                            DropdownMenuItem(
+                                text = { Text("Stop") },
+                                onClick = {
+                                    menuExpanded = false
+                                    onStop()
+                                }
+                            )
+                        }
+                        DropdownMenuItem(
+                            text = { Text("Set Mood") },
+                            onClick = {
+                                menuExpanded = false
+                                moodText = download.moodTag ?: ""
+                                moodDialogOpen = true
+                            }
+                        )
+                        DropdownMenuItem(
+                            text = { Text("Delete") },
+                            onClick = {
+                                menuExpanded = false
+                                onDelete()
+                            }
+                        )
+                    }
                 }
             }
         }

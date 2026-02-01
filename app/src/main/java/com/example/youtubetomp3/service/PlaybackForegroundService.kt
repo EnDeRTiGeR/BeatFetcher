@@ -24,6 +24,7 @@ import android.graphics.Color
 import dagger.hilt.android.AndroidEntryPoint
 import javax.inject.Inject
 import com.example.youtubetomp3.MainActivity
+import com.example.youtubetomp3.util.AppearanceBridge
 
 @AndroidEntryPoint
 class PlaybackForegroundService : Service() {
@@ -165,16 +166,19 @@ class PlaybackForegroundService : Service() {
         val canvas = Canvas(bmp)
         val paint = Paint(Paint.ANTI_ALIAS_FLAG)
         // Background gradient
+        val c1 = AppearanceBridge.primaryArgb
+        val c2 = AppearanceBridge.secondaryArgb
+        val c3 = AppearanceBridge.surfaceArgb
         paint.shader = LinearGradient(
             0f, 0f, size.toFloat(), size.toFloat(),
-            intArrayOf(0xFF6200EE.toInt(), 0xFF3700B3.toInt(), 0xFF03DAC5.toInt()),
+            intArrayOf(c1, c2, c3),
             floatArrayOf(0f, 0.6f, 1f),
             Shader.TileMode.CLAMP
         )
         canvas.drawRect(0f, 0f, size.toFloat(), size.toFloat(), paint)
         paint.shader = null
         // Waveform bars
-        paint.color = Color.WHITE
+        paint.color = AppearanceBridge.onSurfaceArgb
         val bars = 12
         val gap = size / (bars * 2f)
         val barW = gap
