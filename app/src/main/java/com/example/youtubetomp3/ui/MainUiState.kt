@@ -18,6 +18,7 @@ data class MainUiState(
     val playbackPositionMs: Long = 0L,
     val playbackDurationMs: Long = 0L,
     val artworkData: ByteArray? = null,
+    val audioSessionId: Int = 0,
     val currentVideoId: String? = null,
     val shuffleEnabled: Boolean = false,
     val repeatOne: Boolean = false,

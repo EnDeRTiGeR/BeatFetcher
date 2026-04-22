@@ -14,10 +14,12 @@ import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -30,6 +32,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -60,6 +63,26 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.background
 import kotlinx.coroutines.delay
 import coil.compose.AsyncImage
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.rememberLauncherForActivityResult
+import android.app.Activity
+import androidx.compose.ui.res.painterResource
+import com.example.youtubetomp3.R
+import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.infiniteRepeatable
+import android.media.audiofx.Visualizer
+import android.os.Handler
+import android.os.Looper
+import kotlin.math.abs
+import kotlin.math.sqrt
+import kotlin.math.sin
 
 @Composable
 fun MediaPlayerScreen(
@@ -80,6 +103,22 @@ fun MediaPlayerScreen(
 
     @OptIn(ExperimentalMaterial3Api::class)
     val actionsSheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    val deleteLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartIntentSenderForResult()
+    ) { result ->
+        viewModel.onDeletePermissionResult(result.resultCode == Activity.RESULT_OK)
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.deleteRequestEvents.collect { sender ->
+            try {
+                deleteLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            } catch (_: Exception) {
+                viewModel.onDeletePermissionResult(false)
+            }
+        }
+    }
 
     if (moodDialogOpen && actionsSong != null) {
         AlertDialog(
@@ -377,9 +416,10 @@ fun MediaPlayerScreen(
                     }
                     Spacer(Modifier.height(28.dp))
 
-                    RotatingDisk(
+                    BeatReactiveOrb(
                         artworkData = uiState.artworkData,
-                        isPlaying = uiState.isPlaying
+                        isPlaying = uiState.isPlaying,
+                        audioSessionId = uiState.audioSessionId
                     )
                     Spacer(Modifier.height(8.dp))
 
@@ -917,6 +957,249 @@ private fun RotatingDisk(
                 .drawBehind { drawCircle(color = bgColor) }
         )
     }
+}
+
+@Composable
+private fun BeatReactiveOrb(
+    artworkData: ByteArray?,
+    isPlaying: Boolean,
+    audioSessionId: Int,
+    sizeDp: androidx.compose.ui.unit.Dp = 240.dp
+) {
+    val surfaceVariant = MaterialTheme.colorScheme.surfaceVariant
+    val primary = MaterialTheme.colorScheme.primary
+    val onSurface = MaterialTheme.colorScheme.onSurface
+    val bg = MaterialTheme.colorScheme.background
+
+    // Real beat level from Visualizer (falls back to synthetic pulse if unavailable).
+    val visLevel = rememberVisualizerBeatLevel(
+        enabled = isPlaying,
+        audioSessionId = audioSessionId
+    )
+
+    // Synthetic fallback (and also a smoothing carrier for devices where Visualizer is blocked).
+    val infinite = rememberInfiniteTransition(label = "beat")
+    val beat by infinite.animateFloat(
+        initialValue = 0f,
+        targetValue = 1f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 520, easing = LinearEasing),
+            repeatMode = RepeatMode.Restart
+        ),
+        label = "beatPhase"
+    )
+    val phase = if (isPlaying) beat else 0f
+    val synth = if (isPlaying) (0.78f + 0.22f * sin(phase * (Math.PI * 2.0).toFloat())).coerceIn(0.72f, 1.05f) else 0.88f
+    // Blend: when Visualizer works, it dominates; otherwise we stay on synth.
+    val pulse = if (isPlaying) {
+        val reactive = (0.82f + (visLevel * 0.30f)).coerceIn(0.74f, 1.10f)
+        // If visLevel is near-zero (no data), keep synth so the UI doesn't look dead.
+        val w = (visLevel * 1.25f).coerceIn(0f, 1f)
+        (synth * (1f - w) + reactive * w)
+    } else synth
+
+    val artBitmap = remember(artworkData) {
+        artworkData?.let { data ->
+            try { BitmapFactory.decodeByteArray(data, 0, data.size)?.asImageBitmap() } catch (_: Exception) { null }
+        }
+    }
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .height(sizeDp),
+        contentAlignment = Alignment.Center
+    ) {
+        // Abstract reactive orb background
+        Canvas(
+            modifier = Modifier
+                .size(sizeDp)
+                .graphicsLayer {
+                    scaleX = pulse
+                    scaleY = pulse
+                }
+        ) {
+            val r = size.minDimension / 2f
+            val center = Offset(size.width / 2f, size.height / 2f)
+
+            // Soft base disk
+            drawCircle(color = surfaceVariant.copy(alpha = 0.55f), radius = r, center = center)
+
+            // Outer glow ring
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(primary.copy(alpha = 0.55f), primary.copy(alpha = 0.0f)),
+                    center = center,
+                    radius = r * 1.15f
+                ),
+                radius = r * 1.05f,
+                center = center
+            )
+
+            // Three “beat blobs” orbiting the rim
+            val angles = floatArrayOf(phase * 6.28f, phase * 6.28f + 2.15f, phase * 6.28f + 4.1f)
+            val blobRadius = r * 0.16f
+            val orbit = r * 0.78f
+            angles.forEachIndexed { idx, a ->
+                val wobble = 0.92f + 0.08f * kotlin.math.sin(phase * 6.28f + idx)
+                val x = center.x + orbit * kotlin.math.cos(a) * wobble
+                val y = center.y + orbit * kotlin.math.sin(a) * wobble
+                drawCircle(
+                    color = primary.copy(alpha = 0.22f),
+                    radius = blobRadius * (0.85f + 0.25f * wobble),
+                    center = Offset(x, y)
+                )
+            }
+
+            // Inner highlight ring
+            drawCircle(
+                color = onSurface.copy(alpha = if (isPlaying) 0.09f else 0.06f),
+                radius = r * 0.88f,
+                center = center,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = r * 0.03f)
+            )
+
+            // Subtle inner gradient
+            drawCircle(
+                brush = Brush.radialGradient(
+                    colors = listOf(bg.copy(alpha = 0.0f), bg.copy(alpha = 0.28f)),
+                    center = center,
+                    radius = r
+                ),
+                radius = r,
+                center = center
+            )
+        }
+
+        // Center “logo” circle (artwork if available, otherwise app icon) + smaller border ring
+        val centerSize = sizeDp * 0.46f
+        val borderSize = sizeDp * 0.52f
+
+        Box(
+            modifier = Modifier
+                .size(borderSize)
+                .clip(CircleShape)
+                .background(Color.Transparent)
+                .drawBehind {
+                    // Always show a thin border ring; make it slightly stronger when no artwork.
+                    val alpha = if (artBitmap == null) 0.38f else 0.22f
+                    val stroke = size.minDimension * 0.035f
+                    drawCircle(
+                        color = primary.copy(alpha = alpha),
+                        style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke)
+                    )
+                }
+        )
+
+        Box(
+            modifier = Modifier
+                .size(centerSize)
+                .clip(CircleShape)
+                .background(surfaceVariant.copy(alpha = 0.55f)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (artBitmap != null) {
+                Image(
+                    bitmap = artBitmap,
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                // App logo fallback
+                Image(
+                    painter = painterResource(id = R.mipmap.mp3_foreground),
+                    contentDescription = null,
+                    modifier = Modifier.fillMaxSize().padding(18.dp),
+                    contentScale = ContentScale.Fit
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun rememberVisualizerBeatLevel(
+    enabled: Boolean,
+    audioSessionId: Int
+): Float {
+    var level by remember { mutableStateOf(0f) }
+    val mainHandler = remember { Handler(Looper.getMainLooper()) }
+
+    DisposableEffect(enabled, audioSessionId) {
+        var visualizer: Visualizer? = null
+        if (!enabled || audioSessionId <= 0) {
+            level = 0f
+            onDispose { }
+        } else {
+            try {
+                val v = Visualizer(audioSessionId)
+                visualizer = v
+
+                // Smallest capture size to keep overhead low
+                val range = try { Visualizer.getCaptureSizeRange() } catch (_: Exception) { intArrayOf(128, 1024) }
+                val captureSize = range.firstOrNull()?.coerceAtLeast(128) ?: 128
+                try { v.captureSize = captureSize } catch (_: Exception) { }
+
+                // Throttle via Visualizer's built-in rate (we also smooth)
+                v.setDataCaptureListener(
+                    object : Visualizer.OnDataCaptureListener {
+                        // Simple envelope follower: RMS of waveform bytes -> 0..1
+                        override fun onWaveFormDataCapture(
+                            visualizer: Visualizer?,
+                            waveform: ByteArray?,
+                            samplingRate: Int
+                        ) {
+                            val data = waveform ?: return
+                            if (data.isEmpty()) return
+                            var sum = 0.0
+                            // data is signed 8-bit PCM centered at 0
+                            for (b in data) {
+                                val x = b.toInt() / 128.0
+                                sum += x * x
+                            }
+                            val rms = sqrt(sum / data.size.toDouble()) // 0..~1
+                            val target = (rms * 1.35).coerceIn(0.0, 1.0).toFloat()
+                            mainHandler.post {
+                                // Attack/decay smoothing: fast up, slower down
+                                val cur = level
+                                val next = if (target > cur) (cur * 0.55f + target * 0.45f) else (cur * 0.80f + target * 0.20f)
+                                level = next.coerceIn(0f, 1f)
+                            }
+                        }
+
+                        override fun onFftDataCapture(
+                            visualizer: Visualizer?,
+                            fft: ByteArray?,
+                            samplingRate: Int
+                        ) {
+                            // Not used (FFT is heavier; waveform RMS is enough for beat feel)
+                        }
+                    },
+                    Visualizer.getMaxCaptureRate() / 2,
+                    true,
+                    false
+                )
+                v.enabled = true
+            } catch (_: SecurityException) {
+                // Some devices require RECORD_AUDIO permission; fall back silently.
+                level = 0f
+            } catch (_: Throwable) {
+                level = 0f
+            }
+
+            onDispose {
+                try {
+                    visualizer?.enabled = false
+                } catch (_: Exception) { }
+                try {
+                    visualizer?.release()
+                } catch (_: Exception) { }
+            }
+        }
+    }
+
+    return level
 }
 
 private fun formatTime(ms: Long): String {
