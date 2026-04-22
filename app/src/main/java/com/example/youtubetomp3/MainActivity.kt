@@ -111,8 +111,8 @@ import javax.inject.Inject
 class MainActivity : ComponentActivity() {
     companion object {
         // GitHub owner/repo for in-app update release checks
-        private const val GITHUB_OWNER = "Enter_Your_Username"
-        private const val GITHUB_REPO = "Enter_Your_Repo_Name_You_Saved_It_As"
+        private const val GITHUB_OWNER = "EnDeRTiGeR"
+        private const val GITHUB_REPO = "BeatFetcher"
     }
 
 private enum class BeatFetcherMode {
@@ -461,10 +461,10 @@ private fun PersistentWaveHeader(
                 .clip(CircleShape)
                 .combinedClickable(
                     onClick = {
-                        if (!inputLocked && mode == BeatFetcherMode.Extractor) onSingleTap()
-                    },
-                    onDoubleClick = {
-                        if (!inputLocked && mode == BeatFetcherMode.MediaSession) onDoubleTap()
+                        if (inputLocked) return@combinedClickable
+                        // Single-tap toggles modes both directions:
+                        // Extractor ⇄ MediaSession
+                        if (mode == BeatFetcherMode.Extractor) onSingleTap() else onDoubleTap()
                     }
                 )
                 .pointerInput(isDarkVariant, inputLocked) {
