@@ -6,6 +6,11 @@ plugins {
     id 'com.google.dagger.hilt.android'
 }
 
+// Run Kotlin compiler with a modern JDK toolchain (bytecode target stays at 17 below).
+kotlin {
+    jvmToolchain(21)
+}
+
 android {
     namespace = 'com.example.youtubetomp3'
     //noinspection GradleDependency
