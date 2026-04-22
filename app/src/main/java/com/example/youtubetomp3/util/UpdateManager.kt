@@ -5,6 +5,7 @@ import android.app.AlertDialog
 import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
+import android.content.ComponentName
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -97,19 +98,48 @@ class UpdateManager @Inject constructor(
             .setPositiveButton("Open Settings") { _, _ ->
                 try {
                     shouldRetryAfterPermission = true
-                    // Try the standard intent first (works on most devices)
-                    val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                    val pm = activity.packageManager
+
+                    val oppoManageExternalSources = Intent().apply {
+                        component = ComponentName(
+                            "com.android.settings",
+                            "com.android.settings.Settings\$ManageAppExternalSourcesActivity"
+                        )
                         data = Uri.parse("package:${activity.packageName}")
-                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     }
-                    
-                    // Check if intent can be resolved before starting
-                    if (intent.resolveActivity(activity.packageManager) != null) {
-                        activity.startActivity(intent)
-                    } else {
-                        // Fallback: try opening app info settings
-                        openAppInfoSettings(activity)
+
+                    val perApp = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:${activity.packageName}")
                     }
+                    val globalList = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES)
+                    val security = Intent(Settings.ACTION_SECURITY_SETTINGS)
+                    val appInfo = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                        data = Uri.parse("package:${activity.packageName}")
+                    }
+                    val main = Intent(Settings.ACTION_SETTINGS)
+
+                    fun tryStart(intent: Intent): Boolean {
+                        return try {
+                            activity.startActivity(intent)
+                            true
+                        } catch (_: Exception) {
+                            false
+                        }
+                    }
+
+                    if (tryStart(oppoManageExternalSources)) return@setPositiveButton
+                    if (tryStart(perApp)) return@setPositiveButton
+                    if (tryStart(globalList)) return@setPositiveButton
+                    if (tryStart(security)) return@setPositiveButton
+                    if (tryStart(appInfo)) {
+                        Toast.makeText(
+                            activity,
+                            "Open 'Install unknown apps' and enable it for BeatFetcher",
+                            Toast.LENGTH_LONG
+                        ).show()
+                        return@setPositiveButton
+                    }
+                    tryStart(main)
                 } catch (e: ActivityNotFoundException) {
                     Log.w(TAG, "Unknown app sources settings unavailable, trying fallback", e)
                     openAppInfoSettings(activity)
@@ -264,21 +294,31 @@ class UpdateManager @Inject constructor(
             Toast.makeText(activity, "Failed to prepare update file", Toast.LENGTH_LONG).show()
             return
         }
-        
-        val install = Intent(Intent.ACTION_VIEW).apply {
+
+        // Prefer ACTION_INSTALL_PACKAGE (more explicit) and fall back to ACTION_VIEW.
+        val install = Intent(Intent.ACTION_INSTALL_PACKAGE).apply {
+            data = contentUri
+            putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true)
+            putExtra(Intent.EXTRA_RETURN_RESULT, false)
+            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+
+        // Some OEMs still rely on VIEW + MIME.
+        val viewFallback = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(contentUri, APK_MIME)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            // For Android 7.0+ (API 24+), also grant write permission if needed
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                addFlags(Intent.FLAG_GRANT_WRITE_URI_PERMISSION)
-            }
         }
         
         try {
             // Verify that an app can handle this intent
-            if (install.resolveActivity(activity.packageManager) != null) {
-                activity.startActivity(install)
+            val pm = activity.packageManager
+            val toLaunch = when {
+                install.resolveActivity(pm) != null -> install
+                viewFallback.resolveActivity(pm) != null -> viewFallback
+                else -> null
+            }
+            if (toLaunch != null) {
+                activity.startActivity(toLaunch)
                 Log.d(TAG, "Install intent started successfully")
             } else {
                 Log.e(TAG, "No app found to handle installation")
