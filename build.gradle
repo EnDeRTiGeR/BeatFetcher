@@ -1,182 +1,50 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+
 plugins {
-    id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
-    id 'org.jetbrains.kotlin.plugin.compose'
-    id 'kotlin-kapt'
-    id 'com.google.dagger.hilt.android'
+    //noinspection GradlePluginVersion
+    id 'com.android.application' version "$agp_version" apply false
+    //noinspection GradlePluginVersion
+    id 'com.android.library' version "$agp_version" apply false
+    id 'org.jetbrains.kotlin.android' version "$kotlin_version" apply false
+    id 'com.google.dagger.hilt.android' version "$hilt_version" apply false
+    id 'com.github.ben-manes.versions' version '0.52.0' apply false
+    id 'org.jetbrains.kotlin.plugin.serialization' version "$kotlin_version" apply false
+    id 'org.jetbrains.kotlin.plugin.compose' version "$kotlin_version" apply false
 }
 
-// Run Kotlin compiler with a modern JDK toolchain (bytecode target stays at 17 below).
-kotlin {
-    jvmToolchain(21)
-}
-
-android {
-    namespace = 'com.example.youtubetomp3'
-    //noinspection GradleDependency
-    compileSdk 36
-
-    defaultConfig {
-        applicationId "com.beatfetcher.ytmp3"
-        minSdk 30 // Android 11
-        //noinspection OldTargetApi
-        targetSdk 36
-        versionCode 10
-        versionName "2.0.0"
-        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
-    }
-
-    signingConfigs {
-        release {
-            // Use properties from user or project gradle.properties for safety
-            if (project.hasProperty('RELEASE_STORE_FILE')) {
-                storeFile file(RELEASE_STORE_FILE)
-                storePassword project.findProperty('RELEASE_STORE_PASSWORD') ?: ""
-                keyAlias project.findProperty('RELEASE_KEY_ALIAS') ?: ""
-                keyPassword project.findProperty('RELEASE_KEY_PASSWORD') ?: ""
-                enableV1Signing = true
-                enableV2Signing = true
-                enableV3Signing = true
-                enableV4Signing = true
+// Use a modern JDK to run Gradle/Kotlin (toolchain), while keeping Android bytecode targets at 17.
+subprojects {
+    plugins.withId("java") {
+        java {
+            toolchain {
+                languageVersion = JavaLanguageVersion.of(21)
             }
         }
     }
-
-    buildTypes {
-        release {
-            minifyEnabled = false
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            // Only apply signing if properties are defined on this machine
-            if (project.hasProperty('RELEASE_STORE_FILE')) {
-                signingConfig = signingConfigs.release
-            }
+    // Android projects commonly don't apply the plain `java` plugin, so also set Kotlin toolchain.
+    plugins.withId("org.jetbrains.kotlin.android") {
+        kotlin {
+            jvmToolchain(21)
         }
-    }
-    
-    splits {
-        abi {
-            enable = true
-            reset()
-            include 'x86', 'x86_64', 'armeabi-v7a', 'arm64-v8a'
-            universalApk = true
-        }
-    }
-    
-    sourceSets {
-        main {
-            jniLibs.srcDirs = ['libs']
-        }
-    }
-    
-    compileOptions {
-        sourceCompatibility = JavaVersion.VERSION_17
-        targetCompatibility = JavaVersion.VERSION_17
-        coreLibraryDesugaringEnabled = true
-    }
-    kotlinOptions {
-        jvmTarget = '17'
-    }
-    buildFeatures {
-        compose = true
-        buildConfig = true
-    }
-    packaging {
-        jniLibs {
-            useLegacyPackaging = true
-            keepDebugSymbols += ["**/libandroidx.graphics.path.so"]
-        }
-        resources {
-            excludes += '/META-INF/{AL2.0,LGPL2.1}'
-            excludes += '/META-INF/DEPENDENCIES'
-            excludes += '/META-INF/LICENSE*'
-            excludes += '/META-INF/NOTICE*'
-            excludes += '/META-INF/*.kotlin_module'
-            pickFirst 'META-INF/androidx.compose.ui_ui.version'
-            pickFirst 'META-INF/NOTICE.txt'
-            pickFirst 'META-INF/LICENSE.txt'
-            pickFirst 'META-INF/DEPENDENCIES'
-            pickFirst 'META-INF/versions/9/previous-compilation-data.bin'
-        }
-    }
-
-    lint {
-        // Use module-specific lint configuration file
-        lintConfig = file("lint.xml")
     }
 }
 
-dependencies {
-    // Core Android
-    implementation 'androidx.appcompat:appcompat:1.7.1'
-    // Core library desugaring (required for NewPipe on minSdk < 33)
-    coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs_nio:2.1.2'
-    // Core Android
-    implementation 'androidx.core:core-ktx:1.12.0'
-    implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.6.1'
-    implementation 'androidx.activity:activity-compose:1.12.2'
-    
-    // Compose
-    implementation "androidx.compose.ui:ui:$compose_version"
-    implementation "androidx.compose.ui:ui-tooling-preview:$compose_version"
-    implementation 'androidx.compose.material3:material3:1.4.0'
-    implementation "androidx.compose.material:material-icons-extended:$compose_version"
-    
-    // Navigation
-    implementation "androidx.navigation:navigation-compose:2.7.1"
-    
-    // Dependency Injection
-    implementation "com.google.dagger:hilt-android:$hilt_version"
-    kapt "com.google.dagger:hilt-android-compiler:$hilt_version"
-    implementation "androidx.hilt:hilt-navigation-compose:1.0.0"
-    
-    // Coroutines
-    implementation "org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1"
-    
-    // Media3 Transformer for audio-only export (WAV/M4A)
-    implementation 'androidx.media3:media3-transformer:1.4.1'
-    
-    // YouTube extractor library - NewPipe
-    implementation 'com.github.TeamNewPipe:NewPipeExtractor:v0.25.1'
-    
-    // OkHttp logging for network debugging
-    implementation "com.squareup.okhttp3:logging-interceptor:4.10.0"
-    
-    // Coil for image loading
-    implementation "io.coil-kt:coil-compose:2.7.0"
-    
-    // Room for database
-    implementation "androidx.room:room-runtime:2.5.0"
-    implementation "androidx.room:room-ktx:2.5.0"
-    kapt "androidx.room:room-compiler:2.5.0"
-    
+// Configure Java/Kotlin compatibility for all projects
+subprojects {
+    plugins.withId("org.jetbrains.kotlin.android") {
+        tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
+            kotlinOptions {
+                jvmTarget = '17'  // Match Android's default JDK version
+                freeCompilerArgs += [
+                    "-opt-in=kotlin.RequiresOptIn",
+                    "-Xjvm-default=all"
+                ]
+            }
+        }
+    }
+}
 
-    // Media3 (ExoPlayer) for media processing
-    implementation 'androidx.media3:media3-exoplayer:1.4.1'
-    implementation 'androidx.media3:media3-ui:1.4.1'
-    implementation 'androidx.media3:media3-session:1.4.1'
-    implementation 'androidx.media3:media3-common:1.4.1'
-    implementation 'androidx.media3:media3-datasource:1.4.1'
-    implementation 'androidx.media3:media3-datasource-okhttp:1.4.1'
-    implementation 'androidx.media3:media3-muxer:1.4.1'
-    
-    // DataStore
-    implementation "androidx.datastore:datastore-preferences:1.0.0"
-    
-    // Work Manager for background tasks
-    implementation "androidx.work:work-runtime-ktx:2.7.1"
-    
-    // YouTube Player for video preview
-    implementation 'com.pierfrancescosoffritti.androidyoutubeplayer:core:13.0.0'
-    
-    // Lifecycle
-    implementation "androidx.lifecycle:lifecycle-runtime-compose:2.6.1"
-    implementation "androidx.lifecycle:lifecycle-viewmodel-compose:2.6.1"
-    
-    // Testing
-    testImplementation 'junit:junit:4.13.2'
-    androidTestImplementation 'androidx.test.ext:junit:1.1.5'
-    androidTestImplementation 'androidx.test.espresso:espresso-core:3.5.1'
-    androidTestImplementation "androidx.compose.ui:ui-test-junit4:$compose_version"
-    debugImplementation "androidx.compose.ui:ui-tooling:$compose_version"
-    debugImplementation "androidx.compose.ui:ui-test-manifest:$compose_version"
+// Clean build directory
+tasks.register('clean', Delete) {
+    delete rootProject.buildDir
 }
