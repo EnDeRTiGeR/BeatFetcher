@@ -40,6 +40,8 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import com.example.youtubetomp3.data.appDataStore
 import android.provider.MediaStore
 import android.content.ContentUris
+import android.content.IntentSender
+import android.app.RecoverableSecurityException
 import javax.inject.Inject
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -63,6 +65,12 @@ class MainViewModel @Inject constructor(
     // Emits newly shared URLs so the UI can react even when activity is already running
     private val _sharedUrlEvents = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val sharedUrlEvents: SharedFlow<String> = _sharedUrlEvents.asSharedFlow()
+
+    // Emits an IntentSender when the OS requires user confirmation to delete a MediaStore item.
+    private val _deleteRequestEvents = MutableSharedFlow<IntentSender>(extraBufferCapacity = 1)
+    val deleteRequestEvents: SharedFlow<IntentSender> = _deleteRequestEvents.asSharedFlow()
+
+    private var pendingDeleteUri: Uri? = null
 
     // Smoothing job for transform stage (0.70 -> ~0.90)
     private var transformSmoothingJob: Job? = null
@@ -122,7 +130,8 @@ class MainViewModel @Inject constructor(
                             currentlyPlayingPath = ps.currentFilePath,
                             playbackPositionMs = ps.positionMs,
                             playbackDurationMs = ps.durationMs,
-                            artworkData = ps.artworkData
+                            artworkData = ps.artworkData,
+                            audioSessionId = ps.audioSessionId
                         )
                     }
                     // Persist last playback path/position occasionally
@@ -743,16 +752,73 @@ class MainViewModel @Inject constructor(
                     return@launch
                 }
                 val deleted = withContext(Dispatchers.IO) {
-                    try { context.contentResolver.delete(parsed, null, null) } catch (_: Exception) { 0 }
+                    try {
+                        context.contentResolver.delete(parsed, null, null)
+                    } catch (e: SecurityException) {
+                        // Android may require a user-confirmed delete request for MediaStore items
+                        // (especially those not created by this app).
+                        pendingDeleteUri = parsed
+
+                        val intentSender: IntentSender? = when {
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> {
+                                try {
+                                    MediaStore.createDeleteRequest(context.contentResolver, listOf(parsed)).intentSender
+                                } catch (_: Exception) {
+                                    null
+                                }
+                            }
+                            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q -> {
+                                val rse = (e as? RecoverableSecurityException)
+                                rse?.userAction?.actionIntent?.intentSender
+                            }
+                            else -> null
+                        }
+
+                        if (intentSender != null) {
+                            _deleteRequestEvents.tryEmit(intentSender)
+                        }
+                        0
+                    } catch (_: Exception) {
+                        0
+                    }
                 }
                 if (deleted <= 0) {
-                    _uiState.update { it.copy(error = "Unable to delete track (permission denied or file not found)") }
+                    // If we emitted a delete request, UI will prompt the user. Otherwise show an error.
+                    if (pendingDeleteUri == null) {
+                        _uiState.update { it.copy(error = "Unable to delete track (file not found)") }
+                    } else {
+                        _uiState.update { it.copy(error = "Delete needs permission approval") }
+                    }
                     return@launch
                 }
                 // Refresh library
                 scanLibrary(force = true)
             } catch (e: Exception) {
                 Log.e("MainViewModel", "Failed to delete library song", e)
+                _uiState.update { it.copy(error = "Failed to delete track: ${e.message}") }
+            }
+        }
+    }
+
+    fun onDeletePermissionResult(approved: Boolean) {
+        if (!approved) {
+            pendingDeleteUri = null
+            _uiState.update { it.copy(error = "Delete cancelled") }
+            return
+        }
+        val uri = pendingDeleteUri ?: return
+        pendingDeleteUri = null
+        viewModelScope.launch {
+            try {
+                val deleted = withContext(Dispatchers.IO) {
+                    try { context.contentResolver.delete(uri, null, null) } catch (_: Exception) { 0 }
+                }
+                if (deleted > 0) {
+                    scanLibrary(force = true)
+                } else {
+                    _uiState.update { it.copy(error = "Unable to delete track") }
+                }
+            } catch (e: Exception) {
                 _uiState.update { it.copy(error = "Failed to delete track: ${e.message}") }
             }
         }
