@@ -363,15 +363,24 @@ class AudioPlayerService @Inject constructor(
             val newIsLoading = player.playbackState == Player.STATE_BUFFERING
             val newPath = player.currentMediaItem?.localConfiguration?.uri?.toString()
             val newArt = player.mediaMetadata.artworkData
+            val newSessionId = try { player.audioSessionId } catch (_: Exception) { 0 }
             val prev = _playerState.value
-            if (newPos != prev.positionMs || newDur != prev.durationMs || newIsPlaying != prev.isPlaying || newIsLoading != prev.isLoading || newPath != prev.currentFilePath || !java.util.Arrays.equals(newArt, prev.artworkData)) {
+            if (newPos != prev.positionMs ||
+                newDur != prev.durationMs ||
+                newIsPlaying != prev.isPlaying ||
+                newIsLoading != prev.isLoading ||
+                newPath != prev.currentFilePath ||
+                newSessionId != prev.audioSessionId ||
+                !java.util.Arrays.equals(newArt, prev.artworkData)
+            ) {
                 _playerState.value = prev.copy(
                     isPlaying = newIsPlaying,
                     isLoading = newIsLoading,
                     positionMs = newPos,
                     durationMs = newDur,
                     currentFilePath = newPath,
-                    artworkData = newArt
+                    artworkData = newArt,
+                    audioSessionId = newSessionId
                 )
             }
         }
@@ -519,7 +528,8 @@ class AudioPlayerService @Inject constructor(
         val error: String? = null,
         val positionMs: Long = 0L,
         val durationMs: Long = 0L,
-        val artworkData: ByteArray? = null
+        val artworkData: ByteArray? = null,
+        val audioSessionId: Int = 0
     )
 
     sealed class PlayerEvent {
